@@ -1,9 +1,0 @@
-# Industrial Safety System — Backend Dependencies
-# Install with: pip install -r requirements.txt
-
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9        # required for UploadFile / Form support
-ultralytics>=8.1.0             # YOLOv8
-opencv-python-headless>=4.9.0  # cv2 (headless = no GUI deps, good for servers)
-numpy>=1.26.0

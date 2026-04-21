@@ -97,30 +97,3 @@ def main():
         size_mb = os.path.getsize(DEST) / 1_048_576
         print()
         print("=" * 60)
-        print(f"SUCCESS  ->  {DEST}  ({size_mb:.1f} MB)")
-        print()
-        print("Next steps:")
-        print("  1. Install backend deps:  pip install -r backend/requirements.txt")
-        print("  2. Start backend:         cd backend && uvicorn main:app --reload")
-        print("  3. Test endpoint:         http://localhost:8000/docs")
-        print()
-        print("For a REAL PPE model (helmet + vest labels), download from:")
-        print("  https://universe.roboflow.com  -> search 'PPE YOLOv8'")
-        print("  Save as: backend/models/ppe_model.pt")
-        print("=" * 60)
-        sys.exit(0)
-    else:
-        print()
-        print("=" * 60)
-        print("MANUAL DOWNLOAD REQUIRED")
-        print()
-        print("  1. Go to: https://universe.roboflow.com")
-        print("  2. Search: PPE Detection YOLOv8")
-        print("  3. Download the YOLOv8 .pt model file")
-        print("  4. Rename / copy it to: backend/models/ppe_model.pt")
-        print("=" * 60)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

@@ -1,283 +1,201 @@
 """
 ppe_utils.py
 ============
-Utility / helper functions for the PPE Detection module.
+Utility helpers for the PPE Detection module.
 
-Responsibilities:
-  - Normalize raw YOLO class labels to canonical PPE category names
-  - Format bounding-box tensors to plain Python lists
-  - Calculate per-video compliance metrics
-  - Draw annotated bounding boxes on frames (bonus)
+Handles:
+  - Label normalisation for your trained model classes
+    (helmet, vest, gloves, boots, human)
+  - Bounding-box tensor → Python list
+  - Per-frame SAFE/UNSAFE logic
+  - Video-level compliance aggregation
+  - Annotated frame drawing with color-coded boxes
 """
 
 import cv2
 import numpy as np
-from typing import List, Dict, Any, Tuple
-
+from typing import Any, Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
-# Label Normalization
+# 1.  Label normalisation
+#     Maps any variant a YOLO model might output → canonical name
 # ---------------------------------------------------------------------------
 
-# Mapping from any variant a YOLO model might output → canonical PPE label
 _LABEL_MAP: Dict[str, str] = {
-    # Helmets / hard hats
-    "helmet": "helmet",
-    "hard hat": "helmet",
-    "hardhat": "helmet",
-    "hard_hat": "helmet",
-    "head protection": "helmet",
-    # Safety vests / hi-vis
-    "vest": "vest",
-    "safety vest": "vest",
-    "safety_vest": "vest",
-    "hi-vis vest": "vest",
-    "hiviz": "vest",
-    "high vis": "vest",
-    "reflective vest": "vest",
-    # Person (kept for reference; not a PPE item)
-    "person": "person",
+    # Human / person
+    "human":        "human",
+    "person":       "human",
+    # Helmet / hard hat
+    "helmet":       "helmet",
+    "hard hat":     "helmet",
+    "hardhat":      "helmet",
+    "hard_hat":     "helmet",
+    # Safety vest
+    "vest":         "vest",
+    "safety vest":  "vest",
+    "safety_vest":  "vest",
+    "hi-vis vest":  "vest",
+    # Gloves
+    "gloves":       "gloves",
+    "glove":        "gloves",
+    "safety gloves":"gloves",
+    # Boots / safety shoes
+    "boots":        "boots",
+    "boot":         "boots",
+    "safety boots": "boots",
+    "safety shoes": "boots",
 }
 
+# PPE items that count toward compliance (NOT "human")
+PPE_ITEMS = {"helmet", "vest", "gloves", "boots"}
 
-def normalize_label(raw_label: str) -> str:
-    """
-    Convert a raw YOLO detection label to a canonical PPE category.
-
-    Parameters
-    ----------
-    raw_label : str
-        The class name returned by the YOLO model (case-insensitive).
-
-    Returns
-    -------
-    str
-        Canonical label (e.g. ``"helmet"``, ``"vest"``, ``"person"``)
-        or the original label lowercased if it is not in the map.
-    """
-    return _LABEL_MAP.get(raw_label.lower().strip(), raw_label.lower().strip())
+# Minimum PPE required to be SAFE (helmet + vest are mandatory)
+REQUIRED_PPE = {"helmet", "vest"}
 
 
-def is_ppe_label(label: str) -> bool:
-    """Return True if the canonical label is a trackable PPE item."""
-    return label in ("helmet", "vest")
+def normalize_label(raw: str) -> str:
+    """Return canonical label string; falls back to lowercased raw label."""
+    return _LABEL_MAP.get(raw.lower().strip(), raw.lower().strip())
 
 
 # ---------------------------------------------------------------------------
-# Bounding Box Helpers
+# 2.  Bounding box helper
 # ---------------------------------------------------------------------------
 
 def bbox_to_list(box_xyxy) -> List[float]:
-    """
-    Convert an Ultralytics bounding-box tensor/array to a plain Python list
-    ``[x1, y1, x2, y2]`` rounded to 2 decimal places.
-
-    Parameters
-    ----------
-    box_xyxy : torch.Tensor | np.ndarray | list
-        A 1-D array-like of length 4 in x1-y1-x2-y2 format.
-    """
+    """Convert tensor/array [x1,y1,x2,y2] → plain Python list, 2 dp."""
     return [round(float(v), 2) for v in box_xyxy]
 
 
 # ---------------------------------------------------------------------------
-# Detection Filtering
+# 3.  Per-frame SAFE / UNSAFE logic
 # ---------------------------------------------------------------------------
 
-def filter_detections(
-    raw_detections: List[Dict[str, Any]],
-    conf_threshold: float = 0.5,
-) -> List[Dict[str, Any]]:
+def evaluate_frame_safety(
+    detections: List[Dict[str, Any]]
+) -> Tuple[bool, List[str]]:
     """
-    Filter raw detections by confidence threshold and normalise labels.
-
-    Parameters
-    ----------
-    raw_detections : list of dict
-        Each dict must have keys: ``label``, ``confidence``, ``bbox``.
-    conf_threshold : float
-        Minimum confidence to keep a detection (default 0.5).
+    Given the detections for one frame, decide if any visible person
+    is wearing the REQUIRED_PPE items.
 
     Returns
     -------
-    list of dict
-        Filtered + label-normalised detections.
+    (is_safe, missing_items)
+        is_safe      – True if all required PPE detected
+        missing_items – list of required labels that were absent
     """
-    filtered = []
-    for det in raw_detections:
-        if det["confidence"] < conf_threshold:
-            continue
-        det["label"] = normalize_label(det["label"])
-        filtered.append(det)
-    return filtered
+    found_labels = {det["label"] for det in detections}
+    has_human    = "human" in found_labels
+
+    # Only evaluate safety when at least one person is in frame
+    if not has_human:
+        # No person → frame is neutral (treated as safe for compliance)
+        return True, []
+
+    missing = [item for item in REQUIRED_PPE if item not in found_labels]
+    is_safe = len(missing) == 0
+    return is_safe, missing
 
 
 # ---------------------------------------------------------------------------
-# PPE Status per Frame
+# 4.  Video-level compliance summary
 # ---------------------------------------------------------------------------
 
-def compute_frame_ppe_status(
-    detections: List[Dict[str, Any]],
-) -> Tuple[bool, bool]:
-    """
-    Determine whether a helmet and/or vest was detected in a single frame.
-
-    Parameters
-    ----------
-    detections : list of dict
-        Filtered detections with normalised labels.
-
-    Returns
-    -------
-    (helmet_detected, vest_detected) : tuple of bool
-    """
-    helmet_detected = False
-    vest_detected = False
-
-    for det in detections:
-        label = det["label"]
-        if label == "helmet":
-            helmet_detected = True
-        elif label == "vest":
-            vest_detected = True
-
-    return helmet_detected, vest_detected
-
-
-# ---------------------------------------------------------------------------
-# Video-level Compliance Metrics
-# ---------------------------------------------------------------------------
-
-def compute_compliance_metrics(
-    frame_results: List[Dict[str, Any]],
+def compute_summary(
+    frame_results: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """
-    Aggregate per-frame PPE results into video-level compliance metrics.
+    Aggregate per-frame results into the final compliance summary.
 
     Parameters
     ----------
     frame_results : list of dict
-        Each dict must have boolean keys ``helmet`` and ``vest``.
+        Each dict: {frame_id, safe, missing, detections}
 
     Returns
     -------
-    dict with keys:
-        total_frames         : int
-        helmet_frames        : int
-        vest_frames          : int
-        helmet_compliance    : float  (0.0 – 1.0)
-        vest_compliance      : float  (0.0 – 1.0)
-        status               : str
+    dict with keys matching the required output JSON schema.
     """
-    total = len(frame_results)
+    total   = len(frame_results)
     if total == 0:
         return {
-            "total_frames": 0,
-            "helmet_frames": 0,
-            "vest_frames": 0,
-            "helmet_compliance": 0.0,
-            "vest_compliance": 0.0,
-            "status": "No frames processed",
+            "total_frames":     0,
+            "safe_frames":      0,
+            "unsafe_frames":    0,
+            "compliance_score": 0.0,
+            "violations":       [],
         }
 
-    helmet_frames = sum(1 for f in frame_results if f.get("helmet", False))
-    vest_frames   = sum(1 for f in frame_results if f.get("vest",   False))
+    safe_frames   = sum(1 for f in frame_results if f["safe"])
+    unsafe_frames = total - safe_frames
+    compliance    = round((safe_frames / total) * 100, 2)
 
-    helmet_compliance = round(helmet_frames / total, 4)
-    vest_compliance   = round(vest_frames   / total, 4)
-
-    # Determine overall safety status
-    if helmet_compliance < 0.5:
-        status = "Helmet Missing"
-    elif vest_compliance < 0.5:
-        status = "Vest Missing"
-    else:
-        status = "PPE Compliant"
+    violations = [
+        {"frame": f["frame_id"], "missing": f["missing"]}
+        for f in frame_results
+        if not f["safe"]
+    ]
 
     return {
-        "total_frames": total,
-        "helmet_frames": helmet_frames,
-        "vest_frames": vest_frames,
-        "helmet_compliance": helmet_compliance,
-        "vest_compliance": vest_compliance,
-        "status": status,
+        "total_frames":     total,
+        "safe_frames":      safe_frames,
+        "unsafe_frames":    unsafe_frames,
+        "compliance_score": compliance,
+        "violations":       violations,
     }
 
 
 # ---------------------------------------------------------------------------
-# Annotation (Bonus)
+# 5.  Annotation / Drawing
 # ---------------------------------------------------------------------------
 
-# Colour palette for known PPE labels (BGR for OpenCV)
-_BBOX_COLOURS: Dict[str, Tuple[int, int, int]] = {
-    "helmet": (0, 200, 0),    # Green
-    "vest":   (0, 165, 255),  # Orange
-    "person": (255, 255, 0),  # Cyan
+# BGR colour palette (OpenCV = BGR not RGB)
+_COLOURS: Dict[str, Tuple[int, int, int]] = {
+    "human":  (255, 200,  50),   # light blue
+    "helmet": (  0, 210,   0),   # green
+    "vest":   (  0, 165, 255),   # orange
+    "gloves": (255,   0, 200),   # magenta
+    "boots":  (  0, 220, 220),   # yellow
 }
-_DEFAULT_COLOUR: Tuple[int, int, int] = (0, 0, 255)  # Red for unknowns / missing
+_MISSING_COLOUR: Tuple[int, int, int] = (0, 0, 255)   # red for unknown/alerts
 
 
 def draw_detections(
     frame: np.ndarray,
     detections: List[Dict[str, Any]],
-    helmet_detected: bool,
-    vest_detected: bool,
+    is_safe: bool,
+    missing: List[str],
 ) -> np.ndarray:
     """
-    Draw bounding boxes and labels on a copy of *frame*.
+    Draw colour-coded bounding boxes and a safety status banner on *frame*.
 
-    Boxes are green for known PPE items; red for missing-PPE warning overlay.
-
-    Parameters
-    ----------
-    frame : np.ndarray
-        BGR image array (H × W × 3).
-    detections : list of dict
-        Filtered detections with keys ``label``, ``confidence``, ``bbox``.
-    helmet_detected : bool
-    vest_detected   : bool
-
-    Returns
-    -------
-    np.ndarray
-        Annotated frame (same shape as input).
+    Returns a new annotated copy (does not modify original).
     """
-    annotated = frame.copy()
+    out = frame.copy()
 
     for det in detections:
         label = det["label"]
         conf  = det["confidence"]
         x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
 
-        colour = _BBOX_COLOURS.get(label, _DEFAULT_COLOUR)
+        colour = _COLOURS.get(label, _MISSING_COLOUR)
+        cv2.rectangle(out, (x1, y1), (x2, y2), colour, 2)
 
-        # Draw rectangle
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
-
-        # Label text
         text = f"{label} {conf:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw, y1), colour, -1)
+        cv2.rectangle(out, (x1, y1 - th - 6), (x1 + tw + 2, y1), colour, -1)
         cv2.putText(
-            annotated, text,
-            (x1, y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-            (255, 255, 255), 1, cv2.LINE_AA,
+            out, text, (x1 + 1, y1 - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
         )
 
-    # Corner status indicators
-    status_lines = [
-        ("Helmet: OK" if helmet_detected else "Helmet: MISSING",
-         (0, 200, 0) if helmet_detected else (0, 0, 255)),
-        ("Vest:   OK" if vest_detected else "Vest:   MISSING",
-         (0, 200, 0) if vest_detected else (0, 0, 255)),
-    ]
-    for i, (txt, col) in enumerate(status_lines):
-        cv2.putText(
-            annotated, txt,
-            (10, 28 + i * 26),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-            col, 2, cv2.LINE_AA,
-        )
+    # Top-left safety banner
+    banner_colour = (0, 200, 0) if is_safe else (0, 0, 230)
+    banner_text   = "SAFE" if is_safe else f"UNSAFE – missing: {', '.join(missing)}"
+    cv2.rectangle(out, (0, 0), (out.shape[1], 34), banner_colour, -1)
+    cv2.putText(
+        out, banner_text, (8, 24),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA,
+    )
 
-    return annotated
+    return out
