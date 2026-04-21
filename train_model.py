@@ -32,6 +32,7 @@ Usage:
   python train_model.py
 """
 
+import sys
 from pathlib import Path
 from typing import Tuple
 
@@ -42,6 +43,13 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import train_test_split
 
 from utils import FEATURE_COLS
+
+# Fix Windows console encoding (handles emoji in filenames like '👷')
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass  # Python < 3.7 fallback — emoji will be replaced by '?'
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -89,10 +97,15 @@ def video_based_split(
     train_df = df[df["video_name"].isin(train_videos)].copy()
     test_df = df[df["video_name"].isin(test_videos)].copy()
 
+    def _safe_names(names) -> str:
+        """Encode names as ASCII for safe terminal printing on Windows."""
+        return str(sorted(str(n).encode('ascii', errors='replace').decode('ascii')
+                          for n in names))
+
     print(f"\n--- Video-Based Split ---")
     print(f"  Total videos : {len(video_names)}")
-    print(f"  Train ({len(train_videos):2d}) : {sorted(train_videos)}")
-    print(f"  Test  ({len(test_videos):2d}) : {sorted(test_videos)}")
+    print(f"  Train ({len(train_videos):2d}) : {_safe_names(train_videos)}")
+    print(f"  Test  ({len(test_videos):2d}) : {_safe_names(test_videos)}")
     print(f"  Train samples: {len(train_df)}")
     print(f"  Test  samples: {len(test_df)}")
 

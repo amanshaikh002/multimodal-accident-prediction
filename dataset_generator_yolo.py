@@ -31,6 +31,7 @@ Usage:
 """
 
 import csv
+import math
 import random
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -184,7 +185,6 @@ def process_video(
             continue
 
         # Check for any NaN in extracted features (degenerate geometry)
-        import math
         if any(math.isnan(v) for v in feats.values()):
             skipped_nan += 1
             frame_id += 1
