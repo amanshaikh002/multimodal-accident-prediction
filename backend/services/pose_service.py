@@ -27,7 +27,6 @@ Pipeline
 import logging
 import math
 import os
-import sys
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,38 +38,24 @@ import torch
 from ultralytics import YOLO
 
 # ---------------------------------------------------------------------------
-# Path plumbing
+# Imports — all from backend-local modules (no root-level dependencies)
 # ---------------------------------------------------------------------------
-import importlib.util
 
-# Ensure the project root (one level above backend/) is on sys.path so we
-# can import the shared utils.py that lives next to app_yolo.py.
-_BACKEND_DIR  = Path(__file__).resolve().parent.parent          # …/backend/
-_PROJECT_ROOT = _BACKEND_DIR.parent                             # …/PoseNet Model/
-
-for _p in [str(_BACKEND_DIR), str(_PROJECT_ROOT)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-# Load the root utils.py explicitly to avoid collision with backend/utils/
-_ROOT_UTILS_PATH = _PROJECT_ROOT / "utils.py"
-_spec = importlib.util.spec_from_file_location("root_utils", str(_ROOT_UTILS_PATH))
-root_utils = importlib.util.module_from_spec(_spec)
-sys.modules["root_utils"] = root_utils
-_spec.loader.exec_module(root_utils)
-
-FEATURE_COLS = root_utils.FEATURE_COLS
-LABEL_COLORS_BGR = root_utils.LABEL_COLORS_BGR
-LABEL_NAMES = root_utils.LABEL_NAMES
-SKELETON = root_utils.SKELETON
-build_feature_vector = root_utils.build_feature_vector
-extract_all_features = root_utils.extract_all_features
-is_pose_valid = root_utils.is_pose_valid
-make_empty_buffers = root_utils.make_empty_buffers
-select_primary_person = root_utils.select_primary_person
-
-# Shared video I/O helpers (backend/utils/video_utils.py)
-from utils.video_utils import get_video_writer, open_video      # noqa: E402
+from utils.pose_utils import (          # backend/utils/pose_utils.py
+    FEATURE_COLS,
+    LABEL_COLORS_BGR,
+    LABEL_NAMES,
+    SKELETON,
+    build_feature_vector,
+    build_violation_reason as _build_violation_reason,
+    draw_hud_overlay       as _draw_hud_overlay_util,
+    draw_skeleton          as _draw_skeleton_util,
+    extract_all_features,
+    is_pose_valid,
+    make_empty_buffers,
+    select_primary_person,
+)
+from utils.video_utils import get_video_writer, open_video   # backend/utils/video_utils.py
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +63,9 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-_YOLO_MODEL_NAME: str = "yolov8s-pose.pt"   # auto-downloaded if not present
+_YOLO_MODEL_PATH: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "models", "yolov8s-pose.pt")
+)
 _MODEL_PATH: str = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "models", "model.pkl")
 )
@@ -113,8 +100,10 @@ def _get_yolo() -> YOLO:
     """Return the cached YOLO pose model, loading it on first call."""
     global _yolo_model
     if _yolo_model is None:
-        logger.info("Loading YOLO pose model: %s  (device=%s)", _YOLO_MODEL_NAME, _DEVICE)
-        _yolo_model = YOLO(_YOLO_MODEL_NAME)
+        # Use local model file if present, otherwise fall back to auto-download
+        model_src = _YOLO_MODEL_PATH if os.path.isfile(_YOLO_MODEL_PATH) else "yolov8s-pose.pt"
+        logger.info("Loading YOLO pose model: %s  (device=%s)", model_src, _DEVICE)
+        _yolo_model = YOLO(model_src)
         logger.info("YOLO pose model loaded.")
     return _yolo_model
 
@@ -224,19 +213,8 @@ def _draw_skeleton(
     kps_conf: np.ndarray,
     conf_thr: float = 0.30,
 ) -> None:
-    """Draw COCO-17 skeleton lines and joint circles on the frame (in-place)."""
-    for a, b in SKELETON:
-        if float(kps_conf[a]) >= conf_thr and float(kps_conf[b]) >= conf_thr:
-            p1 = (int(kps_xy[a][0]), int(kps_xy[a][1]))
-            p2 = (int(kps_xy[b][0]), int(kps_xy[b][1]))
-            cv2.line(frame, p1, p2, (255, 230, 50), 2, cv2.LINE_AA)
-    for i in range(len(kps_xy)):
-        if float(kps_conf[i]) >= conf_thr:
-            cv2.circle(
-                frame,
-                (int(kps_xy[i][0]), int(kps_xy[i][1])),
-                4, (0, 255, 255), -1, cv2.LINE_AA,
-            )
+    """Delegate to pose_utils.draw_skeleton."""
+    _draw_skeleton_util(frame, kps_xy, kps_conf, conf_thr)
 
 
 def _draw_hud_overlay(
@@ -247,44 +225,8 @@ def _draw_hud_overlay(
     box_xyxy: np.ndarray,
     color_bgr: Tuple[int, int, int],
 ) -> None:
-    """
-    Render a rich HUD overlay on the frame (in-place):
-      - Coloured bounding box with label + confidence badge
-      - Angle readouts (back / knee / neck) in top-left corner
-    """
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    x1 = int(box_xyxy[0]);  y1 = int(box_xyxy[1])
-    x2 = int(box_xyxy[2]);  y2 = int(box_xyxy[3])
-
-    # Bounding box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2, cv2.LINE_AA)
-
-    # Label badge above bounding box
-    badge_text = f"{label}  {confidence * 100:.0f}%"
-    (tw, th), _ = cv2.getTextSize(badge_text, font, 0.65, 2)
-    badge_y = max(y1 - 10, th + 8)
-    cv2.rectangle(frame, (x1, badge_y - th - 6), (x1 + tw + 10, badge_y + 4), color_bgr, -1)
-    cv2.putText(frame, badge_text, (x1 + 5, badge_y - 2), font, 0.65, (0, 0, 0), 2, cv2.LINE_AA)
-
-    # Angle HUD (top-left, semi-transparent background)
-    ba = features.get("back_angle", float("nan"))
-    ka = features.get("knee_angle", float("nan"))
-    na = features.get("neck_angle", float("nan"))
-
-    hud_lines = [
-        f"Back : {ba:5.1f}deg" if not math.isnan(ba) else "Back : N/A",
-        f"Knee : {ka:5.1f}deg" if not math.isnan(ka) else "Knee : N/A",
-        f"Neck : {na:5.1f}deg" if not math.isnan(na) else "Neck : N/A",
-    ]
-    hud_x, hud_y0, hud_h = 12, 28, 20
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (8, 8), (200, hud_y0 + len(hud_lines) * hud_h + 4), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-    for i, line in enumerate(hud_lines):
-        cv2.putText(
-            frame, line, (hud_x, hud_y0 + i * hud_h),
-            font, 0.52, (220, 220, 220), 1, cv2.LINE_AA,
-        )
+    """Delegate to pose_utils.draw_hud_overlay."""
+    _draw_hud_overlay_util(frame, features, label, confidence, box_xyxy, color_bgr, _INFER_H)
 
 
 # ---------------------------------------------------------------------------
