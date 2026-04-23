@@ -36,6 +36,7 @@ if str(_HERE) not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # ---------- Routers ----------
 from routes.detect import detect_router          # unified  (PRIMARY)
@@ -83,10 +84,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",   # CRA default
-        "http://localhost:5173",   # Vite default
+        "http://localhost:3000",   # CRA
+        "http://localhost:5173",   # Vite (default)
+        "http://localhost:5174",   # Vite (fallback when 5173 is busy)
+        "http://localhost:5175",   # Vite (fallback)
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -105,6 +110,14 @@ app.include_router(detect_router)
 app.include_router(ppe_router)
 app.include_router(pose_router)
 # app.include_router(sound_router)
+
+# ---------------------------------------------------------------------------
+# Static files — serve annotated output videos to the frontend
+# ---------------------------------------------------------------------------
+
+_OUTPUT_DIR = _HERE / "temp" / "output"
+_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/output", StaticFiles(directory=str(_OUTPUT_DIR)), name="output")
 
 # ---------------------------------------------------------------------------
 # Health endpoints

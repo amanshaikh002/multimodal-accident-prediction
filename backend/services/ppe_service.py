@@ -31,7 +31,7 @@ from utils.ppe_utils import (
     evaluate_frame_safety,
     normalize_label,
 )
-from utils.video_utils import cleanup_file, get_video_writer, open_video
+from utils.video_utils import cleanup_file, finalize_video, get_video_writer, open_video
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +211,8 @@ def run_ppe_detection(
         cap.release()
         if writer is not None:
             writer.release()
+            if output_video_path:
+                finalize_video(output_video_path)
 
     summary = compute_summary(frame_results)
     logger.info(

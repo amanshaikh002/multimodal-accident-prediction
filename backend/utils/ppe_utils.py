@@ -68,31 +68,80 @@ def bbox_to_list(box_xyxy) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# 3.  Per-frame SAFE / UNSAFE logic
+# 2b.  Bounding-box IoU (Intersection over Union)
 # ---------------------------------------------------------------------------
+
+def _box_iou(box1: List[float], box2: List[float]) -> float:
+    """
+    Compute IoU between two [x1, y1, x2, y2] bounding boxes.
+    Returns 0.0 if there is no overlap or either box is degenerate.
+    """
+    ix1 = max(box1[0], box2[0])
+    iy1 = max(box1[1], box2[1])
+    ix2 = min(box1[2], box2[2])
+    iy2 = min(box1[3], box2[3])
+
+    inter_w = max(0.0, ix2 - ix1)
+    inter_h = max(0.0, iy2 - iy1)
+    inter   = inter_w * inter_h
+    if inter == 0.0:
+        return 0.0
+
+    area1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
+    area2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+# IoU threshold for a PPE item to count as "on" a person
+_IOU_PPE_THRESHOLD: float = 0.05
+# Minimum detection confidence to include any detection (Part 7)
+_MIN_DET_CONF: float = 0.50
+
 
 def evaluate_frame_safety(
     detections: List[Dict[str, Any]]
 ) -> Tuple[bool, List[str]]:
     """
-    Given the detections for one frame, decide if any visible person
-    is wearing the REQUIRED_PPE items.
+    Given the detections for one frame, decide if each visible person
+    is wearing the REQUIRED_PPE items, verified by bounding-box IoU overlap.
+
+    A PPE item is considered "worn" only if its bbox has IoU > _IOU_PPE_THRESHOLD
+    with the person's bbox AND its detection confidence >= _MIN_DET_CONF.
 
     Returns
     -------
     (is_safe, missing_items)
-        is_safe      – True if all required PPE detected
-        missing_items – list of required labels that were absent
+        is_safe      – True if all required PPE detected on the person
+        missing_items – list of required labels that were absent / not overlapping
     """
-    found_labels = {det["label"] for det in detections}
+    # Filter out low-confidence detections first (Part 7: conf >= 0.50)
+    dets = [d for d in detections if d["confidence"] >= _MIN_DET_CONF]
+
+    found_labels = {det["label"] for det in dets}
     has_human    = "human" in found_labels
 
-    # Only evaluate safety when at least one person is in frame
+    # No person in frame → treat as safe (no violation to log)
     if not has_human:
-        # No person → frame is neutral (treated as safe for compliance)
         return True, []
 
-    missing = [item for item in REQUIRED_PPE if item not in found_labels]
+    # Collect all person boxes and PPE boxes
+    person_boxes = [d["bbox"] for d in dets if d["label"] == "human"]
+    ppe_boxes: Dict[str, List[List[float]]] = {item: [] for item in REQUIRED_PPE}
+    for d in dets:
+        if d["label"] in REQUIRED_PPE:
+            ppe_boxes[d["label"]].append(d["bbox"])
+
+    # For each person, check whether required PPE overlaps their bbox.
+    # If ANY person is missing PPE, the frame is unsafe.
+    missing_set: set = set()
+    for person_box in person_boxes:
+        for ppe_item, boxes in ppe_boxes.items():
+            worn = any(_box_iou(person_box, pb) > _IOU_PPE_THRESHOLD for pb in boxes)
+            if not worn:
+                missing_set.add(ppe_item)
+
+    missing = sorted(missing_set)
     is_safe = len(missing) == 0
     return is_safe, missing
 

@@ -43,6 +43,7 @@ from utils import (
     select_primary_person,
     extract_all_features,
     build_feature_vector,
+    hybrid_classify,
     is_pose_valid,
 )
 
@@ -75,15 +76,18 @@ _TTS_PROCS: List[subprocess.Popen] = []
 # ---------------------------------------------------------------------------
 
 def _contextual_alert_text(features: Dict[str, float]) -> str:
-    """Build a targeted voice message based on which angles are worst."""
+    """Build a targeted voice message based on which angles are worst.
+    
+    Uses VERTEX ANGLE convention: 180° = straight/upright, lower = more bent.
+    """
     parts: List[str] = ["Unsafe posture detected."]
     ba = features.get("back_angle", float("nan"))
     ka = features.get("knee_angle", float("nan"))
     na = features.get("neck_angle", float("nan"))
 
-    if not math.isnan(ba) and ba > 35:
+    if not math.isnan(ba) and ba < 130:
         parts.append("Avoid bending your back excessively.")
-    if not math.isnan(ka) and ka < 110:
+    if not math.isnan(ka) and ka > 155:
         parts.append("Bend your knees more when lifting.")
     if not math.isnan(na) and na < 130:
         parts.append("Keep your head aligned with your spine.")
@@ -207,34 +211,39 @@ def draw_status_overlay(
 
 
 def build_reasons(features: Dict[str, float], label: str) -> List[str]:
-    """Generate human-readable posture feedback strings."""
+    """Generate human-readable posture feedback strings.
+    
+    Uses VERTEX ANGLE convention: 180° = straight/upright, lower = more bent.
+    """
     reasons: List[str] = []
     ba = features.get("back_angle", float("nan"))
     ka = features.get("knee_angle", float("nan"))
     na = features.get("neck_angle", float("nan"))
 
     if not math.isnan(ba):
-        if ba > 40:
+        if ba < 120:
             reasons.append("Excessive back bending")
-        elif ba > 20:
+        elif ba < 145:
             reasons.append("Moderate back lean")
 
     if not math.isnan(ka):
-        if ka < 100:
+        if ka > 165 and label in ("UNSAFE", "MODERATE"):
+            reasons.append("Stiff legs — bend knees when lifting")
+        elif ka < 100:
             reasons.append("Deep knee bend — use support")
-        elif ka < 140:
-            reasons.append("Moderate knee flexion")
 
     if not math.isnan(na):
         if na < 130:
             reasons.append("Significant neck tilt")
-        elif na < 155:
+        elif na < 150:
             reasons.append("Slight neck forward")
 
     # Positive feedback
     if not math.isnan(ba) and not math.isnan(ka):
-        if ba < 20 and ka > 155:
-            reasons.append("Good ergonomic posture")
+        if ba > 165 and ka > 155:
+            reasons.append("Good upright posture")
+        elif ba > 155 and ka < 130:
+            reasons.append("Good ergonomic lifting posture")
 
     if not reasons:
         reasons.append({
@@ -373,7 +382,7 @@ def process_video(
 
             last_valid_features = features
 
-            # --- Build feature vector & classify ---
+            # --- Build feature vector ---
             x_vec = build_feature_vector(features)
 
             if np.isnan(x_vec).any():
@@ -381,15 +390,19 @@ def process_video(
                 frame_idx += 1
                 continue
 
-            raw_pred = int(classifier.predict(x_vec)[0])
-            confidence = 0.0
-            if hasattr(classifier, "predict_proba"):
-                proba = classifier.predict_proba(x_vec)[0]
-                # Ensure index is within bounds of proba array
-                if raw_pred < len(proba):
-                    confidence = float(proba[raw_pred])
-                else:
-                    confidence = float(proba.max())
+            # --- HYBRID: Rule-based (primary) + ML probability (secondary) ---
+            raw_pred, confidence, decision_src = hybrid_classify(
+                features, classifier, x_vec
+            )
+
+            # --- Debug logging (first 50 frames + every 100th) ---
+            if frame_idx < 50 or frame_idx % 100 == 0:
+                ba_val = features.get('back_angle', 0)
+                ka_val = features.get('knee_angle', 0)
+                na_val = features.get('neck_angle', 0)
+                print(f"[DEBUG] frame={frame_idx}  back={ba_val:.1f}°  knee={ka_val:.1f}°  "
+                      f"neck={na_val:.1f}°  "
+                      f"pred={LABEL_NAMES.get(raw_pred, '?')}  conf={confidence:.2f}  src={decision_src}")
 
             # --- Temporal smoothing (majority vote) ---
             recent_preds.append(raw_pred)
@@ -715,13 +728,13 @@ def main() -> None:
         # Show instruction cards when idle
         c1, c2, c3 = st.columns(3)
         _info_card(c1, "🎯", "SAFE",
-                   "Back < 20° · Knee > 155° · Neck > 160°",
+                   "Back > 150° · Knee 70°-120° (lifting) · Upright",
                    STATUS_COLORS["SAFE"])
         _info_card(c2, "⚡", "MODERATE",
-                   "Back 20–40° · Knee 110–155° · Neck 130–160°",
+                   "Back 120°-150° · Knee 120°-150° · Transition",
                    STATUS_COLORS["MODERATE"])
         _info_card(c3, "🚨", "UNSAFE",
-                   "Back > 40° · Knee < 110° · Neck < 130°",
+                   "Back < 120° · Locked knees (>150°) + bent back · Neck < 120°",
                    STATUS_COLORS["UNSAFE"])
         return
 

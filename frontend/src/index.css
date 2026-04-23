@@ -1,0 +1,91 @@
+/* ============================================================
+   index.css — Global Design Tokens
+   Multimodal Vision Audio Framework Dashboard
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ── Reset & Base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* ── Background ──────────────────────────────────────────── */
+  --bg-base:        #0f172a;
+  --bg-surface:     #141e33;
+  --bg-card:        #1a2540;
+  --bg-card-hover:  #1e2d4a;
+
+  /* ── Borders ─────────────────────────────────────────────── */
+  --border:         #243048;
+  --border-strong:  #2d3f5e;
+
+  /* ── Typography ──────────────────────────────────────────── */
+  --text-primary:   #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted:     #4d6080;
+
+  /* ── Semantic colours ────────────────────────────────────── */
+  --safe:           #10b981;
+  --safe-bg:        rgba(16,185,129,.10);
+  --safe-border:    rgba(16,185,129,.25);
+
+  --unsafe:         #ef4444;
+  --unsafe-bg:      rgba(239,68,68,.10);
+  --unsafe-border:  rgba(239,68,68,.25);
+
+  --warn:           #f59e0b;
+  --warn-bg:        rgba(245,158,11,.10);
+  --warn-border:    rgba(245,158,11,.25);
+
+  --accent:         #3b82f6;
+  --accent-bg:      rgba(59,130,246,.10);
+  --accent-border:  rgba(59,130,246,.25);
+
+  /* ── Radius ──────────────────────────────────────────────── */
+  --r-sm:  6px;
+  --r-md:  10px;
+  --r-lg:  14px;
+
+  /* ── Shadows ─────────────────────────────────────────────── */
+  --shadow-sm:   0 1px 4px rgba(0,0,0,.35);
+  --shadow-card: 0 2px 12px rgba(0,0,0,.40);
+}
+
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root { min-height: 100vh; }
+
+/* ── Utility ─────────────────────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 5px; height: 5px; }
+::-webkit-scrollbar-track  { background: var(--bg-base); }
+::-webkit-scrollbar-thumb  { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── Animations ───────────────────────────────────────────── */
+@keyframes spin         { to { transform: rotate(360deg); } }
+@keyframes pulse        { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+@keyframes fadeSlideUp  {
+  from { opacity:0; transform:translateY(10px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+.fade-in { animation: fadeSlideUp .3s ease both; }
+.spin    { animation: spin .8s linear infinite; }

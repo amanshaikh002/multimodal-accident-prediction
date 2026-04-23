@@ -69,6 +69,28 @@ LABEL_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
     2: (0, 0, 220),    # red — UNSAFE
 }
 
+# ---------------------------------------------------------------------------
+# Ergonomic Thresholds (used by rule-based override AND auto_label.py)
+# ---------------------------------------------------------------------------
+
+# Back angle (vertex at hip, shoulder→hip→knee; 180°=upright)
+BACK_UNSAFE_LOW:   float = 120.0   # < this → always UNSAFE
+BACK_MODERATE_LOW: float = 140.0   # < this (+ locked knees) → UNSAFE
+BACK_SAFE_MIN:     float = 150.0   # > this + knee in range → SAFE
+BACK_UPRIGHT:      float = 160.0   # > this + knee > 150° → standing SAFE
+
+# Knee angle (vertex at knee, hip→knee→ankle; 180°=extended)
+KNEE_LOCKED:       float = 150.0   # > this with bent back → UNSAFE
+KNEE_SQUAT_MIN:    float = 70.0    # lower bound for proper lifting
+KNEE_SQUAT_MAX:    float = 120.0   # upper bound for proper lifting
+
+# Neck angle (vertex at shoulder; 180°=aligned)
+NECK_UNSAFE_LOW:   float = 120.0   # < this → UNSAFE
+
+# ML probability thresholds (Part 7 of spec)
+PROB_UNSAFE_THRESH: float = 0.70   # prob_unsafe > this → UNSAFE
+PROB_SAFE_THRESH:   float = 0.60   # prob_safe   > this → SAFE
+
 # Minimum keypoint confidence to consider a joint reliable
 MIN_KP_CONF: float = 0.40
 
@@ -135,24 +157,15 @@ def midpoint(
 # Ergonomic Angle Calculations (relative, NOT screen-space)
 # ---------------------------------------------------------------------------
 
-def back_angle_vertical(
+def calc_back_angle(
     shoulder: Tuple[float, float],
     hip: Tuple[float, float],
+    knee: Tuple[float, float],
 ) -> float:
     """
-    Angle between the spine vector (shoulder → hip) and the downward vertical.
-
-    Interpretation:
-      0° = perfectly upright spine (no forward lean)
-      90° = horizontal (fully bent forward)
-
-    Using image coordinates where Y increases downward, the downward vertical
-    is (0, +1). The spine vector points from shoulder to hip.
+    Angle between the spine vector (shoulder → hip) and the thigh vector (hip → knee).
     """
-    spine_vec = _vec2(shoulder, hip)          # shoulder → hip
-    vertical_dn = (0.0, 1.0)                  # downward in image coords
-    angle = angle_from_vectors(spine_vec, vertical_dn)
-    return angle  # already in [0, 180]
+    return angle_at_vertex(shoulder, hip, knee)
 
 
 def knee_angle_flex(
@@ -457,7 +470,7 @@ def extract_all_features(
     joints = extract_raw_joints(kps_xy, kps_conf)
 
     # Step 3: Compute raw ergonomic angles
-    raw_back = back_angle_vertical(joints["shoulder_mid"], joints["hip_mid"])
+    raw_back = calc_back_angle(joints["shoulder_mid"], joints["hip_mid"], joints["knee_mid"])
     raw_knee = knee_angle_flex(
         joints["hip_side"], joints["knee_side"], joints["ankle_side"]
     )
@@ -526,14 +539,14 @@ def extract_all_features(
 # Feature Vector Assembly
 # ---------------------------------------------------------------------------
 
-# Canonical ordered feature names used by the classifier
+# Canonical ordered feature names used by the classifier (must match training).
+# 9 stable features: 3 angles + 6 normalized coordinates.
+# Velocity/acceleration deliberately excluded — they cause noise instability.
 FEATURE_COLS: List[str] = [
-    "back_angle", "knee_angle", "neck_angle", "elbow_angle",
-    "back_vel", "knee_vel", "neck_vel",
-    "back_acc", "knee_acc",
+    "back_angle", "knee_angle", "neck_angle",
     "norm_shoulder_x", "norm_shoulder_y",
-    "norm_hip_x", "norm_hip_y",
-    "norm_knee_x", "norm_knee_y",
+    "norm_hip_x",      "norm_hip_y",
+    "norm_knee_x",     "norm_knee_y",
 ]
 
 
@@ -545,10 +558,85 @@ def build_feature_vector(features: Dict[str, float]) -> np.ndarray:
         features: dict returned by extract_all_features()
 
     Returns:
-        np.ndarray of shape (1, 15) as float32
+        np.ndarray of shape (1, 9) as float32
     """
     vec = [features.get(col, 0.0) for col in FEATURE_COLS]
     return np.array([vec], dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid Rule + ML Classification  (Part 10 of specification)
+# ---------------------------------------------------------------------------
+
+def hybrid_classify(
+    features: Dict[str, float],
+    classifier,
+    x_vec: np.ndarray,
+) -> Tuple[int, float, str]:
+    """
+    Hybrid posture classifier combining strict geometric rules (primary)
+    and ML probability scores (secondary refinement).
+
+    Decision hierarchy:
+      1. Extreme cases are handled by geometric rule-based overrides FIRST.
+      2. For ambiguous cases, ML probability thresholds decide.
+      3. Default fallback: MODERATE.
+
+    Returns:
+        (label_id, confidence, decision_source)
+        label_id:         0=SAFE, 1=MODERATE, 2=UNSAFE
+        confidence:       float [0, 1]
+        decision_source:  'rule' or 'ml'
+    """
+    ba = features.get("back_angle",  180.0)
+    ka = features.get("knee_angle",  180.0)
+    na = features.get("neck_angle",  180.0)
+
+    # ── GEOMETRIC OVERRIDES (non-negotiable) ───────────────────────────────
+
+    # 1. Extreme forward bend → UNSAFE (rule is always right here)
+    if ba < BACK_UNSAFE_LOW:
+        return 2, 0.92, "rule"
+
+    # 2. Bent back + locked knees → UNSAFE (classic bad lifting)
+    if ba < BACK_MODERATE_LOW and ka > KNEE_LOCKED:
+        return 2, 0.88, "rule"
+
+    # 3. Severe neck forward head → UNSAFE
+    if na < NECK_UNSAFE_LOW:
+        return 2, 0.85, "rule"
+
+    # 4. Proper lifting posture (straight back + bent knees) → SAFE
+    if ba > BACK_SAFE_MIN and KNEE_SQUAT_MIN <= ka <= KNEE_SQUAT_MAX:
+        return 0, 0.90, "rule"
+
+    # 5. Standing upright → SAFE
+    if ba > BACK_UPRIGHT and ka > KNEE_LOCKED:
+        return 0, 0.92, "rule"
+
+    # ── ML PROBABILITY-BASED DECISION (ambiguous zone) ─────────────────────
+    try:
+        if hasattr(classifier, "predict_proba"):
+            proba = classifier.predict_proba(x_vec)[0]
+            n_cls = len(proba)
+            prob_safe     = float(proba[0]) if n_cls > 0 else 0.0
+            prob_moderate = float(proba[1]) if n_cls > 1 else 0.0
+            prob_unsafe   = float(proba[2]) if n_cls > 2 else 0.0
+
+            if prob_unsafe > PROB_UNSAFE_THRESH:
+                return 2, prob_unsafe, "ml"
+            elif prob_safe > PROB_SAFE_THRESH:
+                return 0, prob_safe, "ml"
+            else:
+                # Argmax as tiebreaker but cap at MODERATE
+                conf = max(prob_safe, prob_moderate, prob_unsafe)
+                return 1, conf, "ml"
+        else:
+            raw = int(classifier.predict(x_vec)[0])
+            return raw, 0.75, "ml"
+    except Exception:
+        # If ML fails for any reason → default MODERATE (safe fallback)
+        return 1, 0.50, "rule"
 
 
 def make_empty_buffers() -> Dict[str, SmoothingBuffer]:

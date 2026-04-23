@@ -253,6 +253,12 @@ async def detect(
         # Always clean up the shared temp input
         _cleanup(_TEMP_INPUT)
 
+    # Attach the output video filename so the frontend can load it
+    if mode == "ppe":
+        result["video_output"] = "ppe_annotated.mp4"
+    elif mode == "pose":
+        result["video_output"] = "pose_annotated.mp4"
+
     logger.info("[%s] detection complete — returning result.", mode.upper())
     return JSONResponse(content=result)
 

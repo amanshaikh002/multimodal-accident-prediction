@@ -51,11 +51,12 @@ from utils.pose_utils import (          # backend/utils/pose_utils.py
     draw_hud_overlay       as _draw_hud_overlay_util,
     draw_skeleton          as _draw_skeleton_util,
     extract_all_features,
+    hybrid_classify,
     is_pose_valid,
     make_empty_buffers,
     select_primary_person,
 )
-from utils.video_utils import get_video_writer, open_video   # backend/utils/video_utils.py
+from utils.video_utils import finalize_video, get_video_writer, open_video   # backend/utils/video_utils.py
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +77,6 @@ _INFER_W:       int   = 640    # resize width  before inference
 _INFER_H:       int   = 480    # resize height before inference
 _SMOOTH_WINDOW: int   = 5      # majority-vote window (frames)
 _SAVE_VIDEO:    bool  = True   # write annotated output video?
-
-# Ergonomic thresholds (used for violation reason strings)
-_BACK_UNSAFE:  float = 40.0   # degrees — back angle above this → unsafe
-_BACK_MOD:     float = 20.0   # degrees — back angle above this → moderate
-_KNEE_UNSAFE:  float = 100.0  # degrees — knee angle below this → unsafe
-_KNEE_MOD:     float = 140.0  # degrees — knee angle below this → moderate
-_NECK_UNSAFE:  float = 130.0  # degrees — neck angle below this → unsafe
-_NECK_MOD:     float = 155.0  # degrees — neck angle below this → moderate
 
 # Use GPU 0 if available, else CPU
 _DEVICE = 0 if torch.cuda.is_available() else "cpu"
@@ -146,65 +139,9 @@ except FileNotFoundError as _err:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _classify_frame(
-    classifier: Any,
-    features: Dict[str, float],
-) -> Tuple[int, float]:
-    """
-    Run the ML classifier on a single frame's feature vector.
 
-    Returns
-    -------
-    (raw_label_int, confidence_float)
-    """
-    x_vec = build_feature_vector(features)
-
-    if np.isnan(x_vec).any():
-        return -1, 0.0
-
-    raw_pred = int(classifier.predict(x_vec)[0])
-    confidence = 0.0
-
-    if hasattr(classifier, "predict_proba"):
-        proba = classifier.predict_proba(x_vec)[0]
-        if raw_pred < len(proba):
-            confidence = float(proba[raw_pred])
-        else:
-            confidence = float(proba.max())
-
-    return raw_pred, confidence
-
-
-def _build_violation_reason(features: Dict[str, float]) -> str:
-    """
-    Produce a concise, human-readable description of the worst ergonomic issue.
-    Used as the "issue" field in the violations list.
-    """
-    reasons: List[str] = []
-
-    ba = features.get("back_angle", float("nan"))
-    ka = features.get("knee_angle", float("nan"))
-    na = features.get("neck_angle", float("nan"))
-
-    if not math.isnan(ba):
-        if ba > _BACK_UNSAFE:
-            reasons.append("Excessive back bending")
-        elif ba > _BACK_MOD:
-            reasons.append("Moderate back lean")
-
-    if not math.isnan(ka):
-        if ka < _KNEE_UNSAFE:
-            reasons.append("Deep knee bend — use support")
-        elif ka < _KNEE_MOD:
-            reasons.append("Moderate knee flexion")
-
-    if not math.isnan(na):
-        if na < _NECK_UNSAFE:
-            reasons.append("Significant neck tilt")
-        elif na < _NECK_MOD:
-            reasons.append("Slight neck forward")
-
-    return " | ".join(reasons) if reasons else "Bad lifting posture"
+# We removed internal classification methods in favour of the shared hybrid_classify
+# imported directly from utils.pose_utils.
 
 
 def _draw_skeleton(
@@ -293,11 +230,13 @@ def process_pose_video(
     buffers      = make_empty_buffers()                 # SmoothingBuffers for angles
     recent_preds: deque = deque(maxlen=_SMOOTH_WINDOW)  # majority-vote window
 
-    safe_frames:   int = 0
-    unsafe_frames: int = 0
-    proc_frames:   int = 0   # successfully processed (pose found) frames
-    raw_idx:       int = 0   # all frames read (before stride filtering)
-    pose_detected: bool = False
+    safe_frames:       int  = 0
+    unsafe_frames:     int  = 0
+    proc_frames:       int  = 0   # successfully processed (pose found) frames
+    raw_idx:           int  = 0   # all frames read (before stride filtering)
+    pose_detected:     bool = False
+    consec_unsafe:     int  = 0   # consecutive UNSAFE frame counter (Part 8)
+    MIN_CONSEC_UNSAFE: int  = 3   # require 3+ consecutive unsafe frames before logging violation
 
     violations: List[Dict[str, Any]] = []
 
@@ -375,13 +314,16 @@ def process_pose_video(
                 _write_no_pose(frame, writer, "Feature extraction failed")
                 continue
 
-            # --- Classify ---
-            raw_pred, confidence = _classify_frame(clf, features)
-            if raw_pred == -1:
-                # NaN in feature vector — skip this frame
+            # --- Hybrid classify (rule-first, ML as hint only) ---
+            x_vec = build_feature_vector(features)
+            if np.isnan(x_vec).any():
+                _write_no_pose(frame, writer, "NaN in features")
                 continue
 
-            # --- Temporal smoothing: 5-frame majority vote ---
+            raw_pred, confidence, decision_src = hybrid_classify(features, clf, x_vec)
+            # raw_pred is already set; no ML override block needed
+
+            # --- Temporal smoothing: 5-frame majority vote (Part 3) ---
             recent_preds.append(raw_pred)
             counter    = Counter(recent_preds)
             final_pred = counter.most_common(1)[0][0]
@@ -389,14 +331,21 @@ def process_pose_video(
             label     = LABEL_NAMES.get(final_pred, "UNKNOWN")
             color_bgr = LABEL_COLORS_BGR.get(final_pred, (200, 200, 200))
 
-            # --- Count safe / unsafe ---
-            # Treat SAFE (0) and MODERATE (1) as safe frames; UNSAFE (2) as unsafe
-            if final_pred == 2:       # UNSAFE
+            # --- Count safe / unsafe + consecutive-frame gate (Part 8) ---
+            if final_pred == 2:   # UNSAFE
+                consec_unsafe += 1
                 unsafe_frames += 1
-                reason = _build_violation_reason(features)
-                violations.append({"frame": proc_frames, "issue": reason})
-            else:                     # SAFE or MODERATE
-                safe_frames += 1
+                # Only log a violation after 3+ consecutive unsafe frames
+                if consec_unsafe >= MIN_CONSEC_UNSAFE:
+                    reason = _build_violation_reason(features)
+                    violations.append({
+                        "frame":      proc_frames,
+                        "reason":     reason,
+                        "confidence": round(confidence, 3),
+                    })
+            else:                 # SAFE or MODERATE
+                consec_unsafe = 0
+                safe_frames  += 1
 
             proc_frames += 1
 
@@ -409,6 +358,8 @@ def process_pose_video(
         cap.release()
         if writer is not None:
             writer.release()
+            if output_video_path:
+                finalize_video(output_video_path)
 
     # --- Guard: no person detected at all ---
     if not pose_detected:
