@@ -82,23 +82,27 @@ ESSENTIAL_JOINTS: List[str] = [
 # Ergonomic Thresholds (used by rule-based override AND auto_label.py)
 # ---------------------------------------------------------------------------
 
-# Back angle (vertex at hip, shoulder→hip→knee; 180°=upright)
-BACK_UNSAFE_LOW:   float = 120.0   # < this → always UNSAFE
-BACK_MODERATE_LOW: float = 140.0   # < this (+ locked knees) → UNSAFE
-BACK_SAFE_MIN:     float = 150.0   # > this + knee in range → SAFE
-BACK_UPRIGHT:      float = 160.0   # > this + knee > 150° → standing SAFE
+# Back angle (vertex at hip; shoulder→hip→knee; 180° = upright)
+# Rule of thumb:
+#   > 150°  → standing/slight lean   = SAFE
+#   110-150° → moderate forward lean  = MODERATE
+#   < 110°  → severe forward bend     = UNSAFE (but only if knees also locked)
+BACK_SAFE_MIN:     float = 150.0
+BACK_MODERATE_LOW: float = 110.0
+BACK_UNSAFE_LOW:   float = 110.0   # combined with locked knees
+BACK_UPRIGHT:      float = 160.0
 
-# Knee angle (vertex at knee, hip→knee→ankle; 180°=extended)
-KNEE_LOCKED:       float = 150.0   # > this with bent back → UNSAFE
-KNEE_SQUAT_MIN:    float = 70.0    # lower bound for proper lifting
-KNEE_SQUAT_MAX:    float = 120.0   # upper bound for proper lifting
+# Knee angle (vertex at knee; hip→knee→ankle; 180° = fully extended)
+KNEE_LOCKED:    float = 160.0   # > this → legs straight (risky when bending)
+KNEE_SQUAT_MAX: float = 130.0   # < this → bent knees (correct lifting posture)
+KNEE_SQUAT_MIN: float = 70.0
 
-# Neck angle (vertex at shoulder; 180°=aligned)
-NECK_UNSAFE_LOW:   float = 120.0   # < this → UNSAFE
+# Neck angle — less strict
+NECK_UNSAFE_LOW:  float = 120.0
 
-# ML probability thresholds (Part 7 of spec)
-PROB_UNSAFE_THRESH: float = 0.70   # prob_unsafe > this → UNSAFE
-PROB_SAFE_THRESH:   float = 0.60   # prob_safe   > this → SAFE
+# ML probability thresholds
+PROB_UNSAFE_THRESH: float = 0.80   # only believe ML unsafe if very confident
+PROB_SAFE_THRESH:   float = 0.55
 
 # ---------------------------------------------------------------------------
 # Canonical feature column order (must match training)
@@ -368,34 +372,31 @@ def build_feature_vector(features: Dict[str, float]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def build_violation_reason(features: Dict[str, float]) -> str:
-    """Return a human-readable string describing the worst ergonomic issue.
-    
-    Uses VERTEX ANGLE convention: 180° = straight, lower = more bent.
-    """
+    """Return a human-readable string describing the worst ergonomic issue."""
     reasons: List[str] = []
     ba = features.get("back_angle", float("nan"))
     ka = features.get("knee_angle", float("nan"))
     na = features.get("neck_angle", float("nan"))
 
     if not math.isnan(ba):
-        if ba < BACK_UNSAFE_LOW:
+        if ba < 110.0:
             reasons.append("Excessive back bending")
-        elif ba < BACK_MODERATE_LOW:
+        elif ba < 130.0:
             reasons.append("Moderate back lean")
 
     if not math.isnan(ka):
-        if ka > KNEE_LOCKED:
+        if ka > KNEE_LOCKED:                      # > 160°
             reasons.append("Stiff legs — bend knees")
         elif ka > 140.0:
             reasons.append("Moderate knee stiffness")
 
     if not math.isnan(na):
-        if na < NECK_UNSAFE_LOW:
+        if na < NECK_UNSAFE_LOW:                  # < 120°
             reasons.append("Significant neck tilt")
-        elif na < 150.0:
+        elif na < 140.0:
             reasons.append("Slight neck forward")
 
-    return " | ".join(reasons) if reasons else "Bad lifting posture"
+    return " | ".join(reasons) if reasons else "Suboptimal lifting posture"
 
 # ---------------------------------------------------------------------------
 # Hybrid Rule + ML Classification
@@ -406,66 +407,96 @@ def hybrid_classify(
     classifier,
     x_vec: np.ndarray,
 ) -> Tuple[int, float, str]:
-    ba = features.get("back_angle",  180.0)
-    ka = features.get("knee_angle",  180.0)
-    na = features.get("neck_angle",  180.0)
-    pose_conf = features.get("pose_conf", 1.0)
+    """
+    Biomechanically-correct posture classification.
 
-    # 1. Print angles
-    print(f"Frame Debug:")
-    print(f"Back: {ba:.1f}")
-    print(f"Knee: {ka:.1f}")
-    print(f"Neck: {na:.1f}")
+    Rule priority (highest to lowest):
+    ──────────────────────────────────
+    A. Definite SAFE patterns (no ML needed)
+       1. Back > 150° (upright / slight lean)                    → SAFE
+       2. Proper squat: back > 130° AND knees bent < 130°       → SAFE
 
-    label = 1
-    conf_score = 0.50
-    source = "rule"
+    B. Definite UNSAFE (waist-bending without knee compensation)
+       3. Back < 110° AND knees locked > 160°                   → UNSAFE
 
-    # 2. Correct safe ranges
-    if ba > 140 and ka < 160 and na < 160:
-        label, conf_score, source = 0, 0.90, "rule"
-        print("→ SAFE")
-    elif 110 <= ba <= 140:
-        label, conf_score, source = 1, 0.85, "rule"
-        print("→ MODERATE")
+    C. Ambiguous moderate zone — use ML as a tiebreaker
+       4. Everything else                                          → ML decision
+          (capped at MODERATE unless ML is extremely confident)
+
+    Additional guards:
+    • Low keypoint confidence (<0.55) → never UNSAFE (downgrade to MODERATE)
+    • Neck UNSAFE low (<120°) adds a flag but doesn't override SAFE
+    """
+    ba        = features.get("back_angle",  180.0)
+    ka        = features.get("knee_angle",  180.0)
+    na        = features.get("neck_angle",  180.0)
+    pose_conf = features.get("pose_conf",   1.0)
+
+    print(f"[POSE] Back={ba:.1f}°  Knee={ka:.1f}°  Neck={na:.1f}°  PoseConf={pose_conf:.2f}")
+
+    label:      int   = 1        # default: MODERATE
+    conf_score: float = 0.50
+    source:     str   = "rule"
+
+    # ── Rule A: Definite SAFE ────────────────────────────────────────────────
+    if ba > 150.0:
+        # Upright or slight lean — always safe regardless of knees/neck
+        label, conf_score, source = 0, 0.90, "rule-A1"
+        print("  → SAFE (upright back)")
+
+    elif ba > 130.0 and ka < 130.0:
+        # Correct squat-lift: back angled forward but knees are bent to compensate
+        label, conf_score, source = 0, 0.85, "rule-A2"
+        print("  → SAFE (correct squat lifting)")
+
+    # ── Rule B: Definite UNSAFE ──────────────────────────────────────────────
+    elif ba < 110.0 and ka > 160.0:
+        # Severe waist-bend with straight legs: textbook dangerous posture
+        label, conf_score, source = 2, 0.90, "rule-B"
+        print("  → UNSAFE (waist-bending, locked knees)")
+
+    # ── Rule C: Ambiguous zone — consult ML ─────────────────────────────────
     else:
-        # 3. Remove hard override (temporarily)
-        # if ba < 110:
-        #     label, conf_score, source = 2, 0.90, "rule"
-        #     print("→ UNSAFE")
-        
-        # Fall back to ML if no rule matches
+        # Back is between 110–150° and knees aren't obviously bent/locked
+        # Use the ML model but cap its power: it can ONLY push to UNSAFE if
+        # it is *very* confident (>80%), otherwise MODERATE is the ceiling.
         try:
             if hasattr(classifier, "predict_proba"):
-                proba = classifier.predict_proba(x_vec)[0]
-                n_cls = len(proba)
+                proba         = classifier.predict_proba(x_vec)[0]
+                n_cls         = len(proba)
                 prob_safe     = float(proba[0]) if n_cls > 0 else 0.0
-                prob_moderate = float(proba[1]) if n_cls > 1 else 0.0
                 prob_unsafe   = float(proba[2]) if n_cls > 2 else 0.0
 
-                if prob_unsafe > PROB_UNSAFE_THRESH:
-                    label, conf_score, source = 2, prob_unsafe, "ml"
-                    print("→ UNSAFE (ML)")
-                elif prob_safe > PROB_SAFE_THRESH:
+                if prob_safe > PROB_SAFE_THRESH:
                     label, conf_score, source = 0, prob_safe, "ml"
-                    print("→ SAFE (ML)")
+                    print(f"  → SAFE (ML prob_safe={prob_safe:.2f})")
+                elif prob_unsafe > PROB_UNSAFE_THRESH:
+                    # ML is very confident this is unsafe — trust it
+                    label, conf_score, source = 2, prob_unsafe, "ml"
+                    print(f"  → UNSAFE (ML prob_unsafe={prob_unsafe:.2f})")
                 else:
-                    conf_score = max(prob_safe, prob_moderate, prob_unsafe)
+                    # Ambiguous — call it MODERATE
+                    conf_score = max(prob_safe, prob_unsafe,
+                                     float(proba[1]) if n_cls > 1 else 0.0)
                     label, source = 1, "ml"
-                    print("→ MODERATE (ML)")
+                    print(f"  → MODERATE (ML ambiguous)")
             else:
-                label = int(classifier.predict(x_vec)[0])
-                conf_score, source = 0.75, "ml"
-        except Exception:
-            label, conf_score, source = 1, 0.50, "rule"
-            print("→ MODERATE (Fallback)")
+                ml_pred = int(classifier.predict(x_vec)[0])
+                # Hard-predict: clamp UNSAFE to MODERATE if back isn't terrible
+                if ml_pred == 2 and ba >= 110.0:
+                    ml_pred = 1
+                label, conf_score, source = ml_pred, 0.70, "ml"
+                print(f"  → {LABEL_NAMES.get(label, '?')} (ML hard-predict)")
+        except Exception as exc:
+            print(f"  → MODERATE (ML error: {exc})")
+            label, conf_score, source = 1, 0.50, "rule-fallback"
 
-    # 5. Add confidence check
-    # If pose detection confidence is low: DO NOT classify as unsafe
-    if label == 2 and pose_conf < 0.60:
-        label = 1
-        print("→ Downgraded to MODERATE due to low pose confidence")
+    # ── Guard: low keypoint confidence ──────────────────────────────────────
+    if label == 2 and pose_conf < 0.55:
+        label, conf_score = 1, conf_score * 0.8
+        print("  → Downgraded UNSAFE → MODERATE (low keypoint confidence)")
 
+    print(f"  Final: {LABEL_NAMES.get(label, '?')} via {source} (conf={conf_score:.2f})")
     return label, conf_score, source
 
 

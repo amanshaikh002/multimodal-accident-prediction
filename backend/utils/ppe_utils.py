@@ -71,14 +71,11 @@ def bbox_to_list(box_xyxy) -> List[float]:
 # 2b.  PPE assignment — center-point containment
 # ---------------------------------------------------------------------------
 
-# Why center-point and NOT IoU:
-#   A helmet bbox covers ~5% of a person bbox area.
+# A helmet bbox covers ~5% of a person bbox area.
 #   IoU(person, helmet) ≈ 0.04 — always below any reasonable threshold.
 #   The correct question is: "Is the PPE item centered inside the person box?"
 #   A helmet on a person's head will always have its center within the person's
 #   bounding box, so center-point containment is the reliable test.
-
-_MIN_DET_CONF: float = 0.50   # reject detections below this confidence
 
 
 def is_ppe_on_person(person_box: List[float], item_box: List[float]) -> bool:
@@ -119,8 +116,8 @@ def evaluate_frame_safety(
     -------
     (is_safe, missing_items)
     """
-    # ── 1. Drop low-confidence detections ────────────────────────────────────
-    dets = [d for d in detections if d["confidence"] >= _MIN_DET_CONF]
+    # Detections are already filtered by confidence in ppe_service.py
+    dets = detections
 
     has_human = any(d["label"] == "human" for d in dets)
     if not has_human:

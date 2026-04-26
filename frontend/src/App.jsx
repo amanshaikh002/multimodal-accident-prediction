@@ -1,13 +1,15 @@
 import { useState, useRef, useCallback } from 'react';
 import {
   HardHat, Upload, Play, Loader2, Volume2, VolumeX,
-  TriangleAlert, CheckCircle2, Wifi
+  TriangleAlert, CheckCircle2, Flame
 } from 'lucide-react';
 import './App.css';
-import { enrichPpeViolations, enrichPoseViolations, enrichCombinedViolations } from './suggestionMap';
+import { enrichPpeViolations, enrichPoseViolations, enrichCombinedViolations, enrichFireViolations } from './suggestionMap';
 import VideoPanel       from './components/VideoPanel';
 import AnalysisPanel    from './components/AnalysisPanel';
 import CombinedPanel    from './components/CombinedPanel';
+import FirePanel        from './components/FirePanel';
+import AllPanel         from './components/AllPanel';
 import ViolationsList   from './components/ViolationsList';
 import Recommendations  from './components/Recommendations';
 import { useAudioAlerts } from './hooks/useAudioAlerts';
@@ -27,7 +29,7 @@ export default function App() {
   const [audioOn,    setAudioOn]    = useState(true);
   const fileRef = useRef();
 
-  const { speakViolations, reset: resetAudio, setEnabled: setAudioEnabled }
+  const { speak, speakViolations, reset: resetAudio, setEnabled: setAudioEnabled }
     = useAudioAlerts();
 
   /* ── File pick ─────────────────────────────────────────────────────────── */
@@ -62,19 +64,35 @@ export default function App() {
       if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
       
       setResult({ mode, data });
-      // Set the dynamic video URL returned/hosted by backend
-      const generatedFile = data.video_output ||
-        (mode === 'ppe' ? 'ppe_annotated.mp4' :
+      // Set the dynamic video URL returned/hosted by backend.
+      // Backend services return `output_video`; legacy key `video_output` kept as fallback.
+      const generatedFile = data.output_video || data.video_output ||
+        (mode === 'ppe'      ? 'ppe_annotated.mp4'      :
          mode === 'combined' ? 'combined_annotated.mp4' :
+         mode === 'fire'     ? 'fire_annotated.mp4'     :
+         mode === 'all'      ? 'fire_annotated.mp4'     :
          'pose_annotated.mp4');
+      // Cache-bust so the browser always fetches the newly written file
       setVideoUrl(`${API}/output/${generatedFile}?t=${Date.now()}`);
 
       // Trigger audio alerts for violations found
       const enriched =
         mode === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
         mode === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
+        mode === 'fire'     ? enrichFireViolations(data) :
+        mode === 'all'      ? enrichCombinedViolations(data.violations ?? []) :
                               enrichPoseViolations(data.violations ?? []);
       speakViolations(enriched);
+
+      // ── Fire-specific urgent voice alert ────────────────────────────────
+      // speak() is called directly (bypassing speakViolations) so the alert
+      // fires even when fire_frames is very low and the violations list is empty.
+      if (mode === 'fire' && data.status === 'UNSAFE') {
+        speak('Warning! Fire detected in the workplace. Evacuate immediately and call emergency services.');
+      }
+      if (mode === 'all' && data.fire_detected) {
+        speak('Warning! Fire detected in the workplace. Evacuate immediately.');
+      }
 
     } catch (err) {
       setError(err.message ?? 'Unexpected error. Is the backend running?');
@@ -92,12 +110,20 @@ export default function App() {
     violations =
       m === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
       m === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
+      m === 'fire'     ? enrichFireViolations(data) :
+      m === 'all'      ? enrichCombinedViolations(data.violations ?? []) :
                          enrichPoseViolations(data.violations ?? []);
-    const score =
-      m === 'ppe'      ? (data.compliance_score ?? 0) :
-      m === 'combined' ? Math.min(data.ppe_score ?? 0, data.pose_score ?? 0) :
-                         (data.safety_score ?? 0);
-    overallSafe = score >= 70 && (m !== 'combined' || data.final_status === 'SAFE');
+    if (m === 'fire') {
+      overallSafe = data.status === 'SAFE';
+    } else if (m === 'all') {
+      overallSafe = data.final_status === 'SAFE';
+    } else {
+      const score =
+        m === 'ppe'      ? (data.compliance_score ?? 0) :
+        m === 'combined' ? Math.min(data.ppe_score ?? 0, data.pose_score ?? 0) :
+                           (data.safety_score ?? 0);
+      overallSafe = score >= 70 && (m !== 'combined' || data.final_status === 'SAFE');
+    }
   }
 
   /* ── Render ────────────────────────────────────────────────────────────── */
@@ -151,10 +177,12 @@ export default function App() {
               value={mode}
               onChange={(e) => { setMode(e.target.value); setResult(null); setError(null); }}
             >
-              <option value="ppe">PPE Compliance Detection</option>
-              <option value="pose">Pose Safety Detection</option>
-              <option value="combined">PPE + Pose Detection</option>
-              <option value="sound" disabled>Sound Detection (coming soon)</option>
+              <option value="ppe">🦺 PPE Compliance Detection</option>
+              <option value="pose">🧍 Pose Safety Detection</option>
+              <option value="fire">🔥 Fire Hazard Detection</option>
+              <option value="combined">🔗 PPE + Pose Detection</option>
+              <option value="all">🚀 Full Platform (PPE + Pose + Fire)</option>
+              <option value="sound" disabled>🔊 Sound Detection (coming soon)</option>
             </select>
           </div>
 
@@ -233,6 +261,10 @@ export default function App() {
               <div className="col-right">
                 {result.mode === 'combined'
                   ? <CombinedPanel data={result.data} />
+                  : result.mode === 'fire'
+                  ? <FirePanel data={result.data} />
+                  : result.mode === 'all'
+                  ? <AllPanel data={result.data} />
                   : <AnalysisPanel mode={result.mode} data={result.data} />}
                 <ViolationsList items={violations} />
                 <Recommendations items={violations} />
@@ -255,6 +287,7 @@ export default function App() {
                   </p>
                   <div className="idle-features">
                     {[
+                      '🔥 Fire hazard detection (NEW)',
                       'Bounding-box overlays on video',
                       'Real-time violation timeline',
                       'Actionable safety recommendations',
@@ -272,7 +305,7 @@ export default function App() {
                 <div className="idle-right">
                   <div className="section-label" style={{ marginBottom: '1.25rem' }}>How to use</div>
                   {[
-                    ['01', 'Select Module', 'Choose PPE or Pose safety detection.'],
+                    ['01', 'Select Module', 'Choose PPE, Pose, Fire, or Full-Platform.'],
                     ['02', 'Upload Video',  'Select a workplace footage file.'],
                     ['03', 'Run Analysis',  'Click Analyse to start AI inference.'],
                     ['04', 'Review Report', 'See annotated video, violations & recommendations.'],

@@ -128,19 +128,10 @@ def _get_pose_clf():
     return _pose_clf
 
 
-# Pre-load at import time (catches missing files early)
-try:
-    _get_pose_yolo()
-except Exception as e:
-    logger.warning("[COMBINED] Pose YOLO pre-load skipped: %s", e)
-try:
-    _get_ppe_yolo()
-except Exception as e:
-    logger.warning("[COMBINED] PPE YOLO pre-load skipped: %s", e)
-try:
-    _get_pose_clf()
-except Exception as e:
-    logger.warning("[COMBINED] Pose classifier pre-load skipped: %s", e)
+# NOTE: Models are NOT pre-loaded at import time.
+# All three models (pose YOLO, PPE YOLO, pose classifier) are loaded lazily
+# on the first request via their singleton getters. This keeps uvicorn startup
+# fast and avoids the ~3-minute GPU-initialization timeout.
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +572,29 @@ def _final_status(ppe_st: str, pose_st: str) -> str:
     if ppe_st == "UNSAFE" and pose_st == "UNSAFE": return "HIGH RISK"
     if ppe_st == "UNSAFE" or pose_st == "UNSAFE":  return "UNSAFE"
     if pose_st == "MODERATE":                       return "MODERATE"
+    return "SAFE"
+
+
+def get_final_status(ppe_status: str, pose_status: str, fire_status: str) -> str:
+    """
+    Unified Decision Engine — derives the single worst-case status
+    across all three modules.
+
+    Priority (highest → lowest):
+        CRITICAL  — fire is UNSAFE (immediate evacuation)
+        HIGH RISK — both PPE and Pose are UNSAFE
+        UNSAFE    — either PPE or Pose is UNSAFE
+        MODERATE  — PPE is SAFE but Pose is MODERATE
+        SAFE      — all modules report SAFE
+    """
+    if fire_status == "UNSAFE":
+        return "CRITICAL"
+    if ppe_status == "UNSAFE" and pose_status == "UNSAFE":
+        return "HIGH RISK"
+    if ppe_status == "UNSAFE" or pose_status == "UNSAFE":
+        return "UNSAFE"
+    if ppe_status == "MODERATE" or pose_status == "MODERATE":
+        return "MODERATE"
     return "SAFE"
 
 

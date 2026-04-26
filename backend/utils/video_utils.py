@@ -33,12 +33,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _get_ffmpeg_exe() -> Optional[str]:
-    """Return the path to the bundled FFmpeg binary, or None."""
+    """Return the path to a usable FFmpeg binary.
+
+    Priority:
+    1. imageio_ffmpeg bundled binary (no system install needed)
+    2. System `ffmpeg` on PATH
+    """
+    # 1. Try imageio_ffmpeg first
     try:
         import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        logger.debug("Using imageio_ffmpeg binary: %s", exe)
+        return exe
+    except Exception as e:
+        logger.debug("imageio_ffmpeg unavailable (%s) — trying system ffmpeg.", e)
+
+    # 2. Fall back to system ffmpeg
+    import shutil
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        logger.debug("Using system ffmpeg: %s", sys_ffmpeg)
+        return sys_ffmpeg
+
+    logger.warning(
+        "No FFmpeg binary found (imageio_ffmpeg not installed AND 'ffmpeg' not on PATH). "
+        "Run: pip install imageio-ffmpeg"
+    )
+    return None
 
 
 def _ffmpeg_reencode(src: str, dst: str) -> bool:
@@ -51,7 +72,7 @@ def _ffmpeg_reencode(src: str, dst: str) -> bool:
     """
     ffmpeg = _get_ffmpeg_exe()
     if ffmpeg is None:
-        logger.warning("imageio_ffmpeg not found — skipping H.264 re-encode.")
+        logger.warning("No FFmpeg binary available — skipping H.264 re-encode.")
         return False
 
     tmp = dst + ".reenc.mp4"
@@ -66,6 +87,7 @@ def _ffmpeg_reencode(src: str, dst: str) -> bool:
         "-an",                      # no audio channel
         tmp,
     ]
+    logger.info("[FFmpeg] Re-encoding: %s → %s", src, tmp)
     try:
         result = subprocess.run(
             cmd,
@@ -79,6 +101,14 @@ def _ffmpeg_reencode(src: str, dst: str) -> bool:
             if os.path.exists(tmp):
                 os.remove(tmp)
             return False
+
+        # Sanity check: temp output must be non-empty
+        if not os.path.exists(tmp) or os.path.getsize(tmp) < 1024:
+            logger.warning("FFmpeg produced an empty/missing output file: %s", tmp)
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            return False
+
         os.replace(tmp, dst)
         logger.info("H.264 re-encode complete → %s  (%.2f MB)",
                     dst, os.path.getsize(dst) / 1_048_576)

@@ -185,3 +185,28 @@ export function riskLevel(score) {
   if (score >= 50) return 'MEDIUM';
   return 'HIGH';
 }
+
+/**
+ * Build a violation list for a fire detection result.
+ * The fire service returns a summary (not per-frame violations),
+ * so we synthesize a single enriched entry when fire is detected.
+ *
+ * @param {Object} data  — full fire result from the backend
+ * @returns {Array}      — [{item, reason, suggestion, severity}]
+ */
+export function enrichFireViolations(data = {}) {
+  const status    = data.status     ?? 'SAFE';
+  const fireRatio = data.fire_ratio ?? 0;
+  const fireF     = data.fire_frames ?? 0;
+
+  if (status !== 'UNSAFE') return [];
+
+  return [
+    {
+      item:       'Fire Hazard',
+      reason:     `Fire detected in ${(fireRatio * 100).toFixed(1)}% of frames (${fireF} frame(s))`,
+      suggestion: 'Activate the fire alarm, evacuate personnel, and contact emergency services immediately.',
+      severity:   'high',
+    },
+  ];
+}

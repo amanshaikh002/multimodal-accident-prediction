@@ -42,7 +42,15 @@ logger = logging.getLogger(__name__)
 _MODEL_PATH    = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "models", "ppe_model.pt")
 )
-_CONF_THRESH   = 0.45       # minimum confidence to keep a detection
+# Class-specific confidence thresholds.
+# Harnesses/vests are often missed by this model, so their threshold is very low.
+_CLASS_THRESHOLDS = {
+    "human":  0.30,
+    "helmet": 0.20,
+    "vest":   0.05,
+    "gloves": 0.20,
+    "boots":  0.20,
+}
 _FRAME_STRIDE  = 2          # process every Nth frame (skip the rest)
 _INFER_W       = 640        # resize width  before inference
 _INFER_H       = 480        # resize height before inference
@@ -73,11 +81,7 @@ def _get_model() -> YOLO:
     return _model
 
 
-# Pre-load at import time (catches missing model early)
-try:
-    _get_model()
-except FileNotFoundError as _err:
-    logger.warning("PPE model pre-load skipped: %s", _err)
+# NOTE: Model is NOT pre-loaded at import time — loaded lazily on first request.
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +116,14 @@ def _infer_frame(model: YOLO, frame) -> List[Dict[str, Any]]:
 
 
 def _filter(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep detections above confidence threshold and normalise labels."""
+    """Keep detections above class-specific confidence threshold and normalise labels."""
     out = []
     for det in raw:
-        if det["confidence"] < _CONF_THRESH:
+        norm_label = normalize_label(det["label"])
+        thresh = _CLASS_THRESHOLDS.get(norm_label, 0.45)
+        if det["confidence"] < thresh:
             continue
-        det["label"] = normalize_label(det["label"])
+        det["label"] = norm_label
         out.append(det)
     return out
 

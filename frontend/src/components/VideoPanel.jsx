@@ -1,11 +1,5 @@
 import { PlayCircle } from 'lucide-react';
 
-const API = 'http://localhost:8000';
-
-const VIDEO_URL = {
-  ppe:  `${API}/output/ppe_annotated.mp4`,
-  pose: `${API}/output/pose_annotated.mp4`,
-};
 
 /**
  * VideoPanel — shows the backend-annotated video for the selected mode.
@@ -30,6 +24,12 @@ export default function VideoPanel({ mode, videoUrl, overallSafe, hasResult }) {
         {overallSafe ? 'COMPLIANT' : 'VIOLATIONS DETECTED'}
       </div>
 
+      {/*
+        Both `src` on the <video> element AND a <source> child are specified so
+        that older browsers that don't read the element-level `src` still work.
+        The explicit type="video/mp4" is mandatory — without it some browsers
+        will refuse to probe/play the file at all (blank screen symptom).
+      */}
       <video
         key={videoUrl}
         className="vp-video"
@@ -37,14 +37,19 @@ export default function VideoPanel({ mode, videoUrl, overallSafe, hasResult }) {
         autoPlay
         muted
         playsInline
-        src={videoUrl}
       >
+        <source src={videoUrl} type="video/mp4" />
         Your browser does not support HTML5 video.
       </video>
 
       <div className="vp-footer">
         <span className="vp-mode-tag">
-          {mode === 'ppe' ? 'PPE Compliance Detection' : 'Pose Safety Detection'}
+          {mode === 'ppe'      ? 'PPE Compliance Detection'  :
+           mode === 'pose'     ? 'Pose Safety Detection'     :
+           mode === 'fire'     ? 'Fire Hazard Detection'     :
+           mode === 'combined' ? 'PPE + Pose Detection'      :
+           mode === 'all'      ? 'Full Platform Detection'   :
+                                 `${mode.toUpperCase()} Detection`}
         </span>
         <span className="vp-hint">Bounding boxes &amp; labels rendered by AI backend</span>
       </div>
