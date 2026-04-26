@@ -30,8 +30,9 @@ from typing import Literal
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 
-from services.ppe_service  import run_ppe_detection
-from services.pose_service import process_pose_video
+from services.ppe_service      import run_ppe_detection
+from services.pose_service     import process_pose_video
+from services.combined_service import process_combined_video
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,11 @@ detect_router = APIRouter(tags=["Unified Detection"])
 # Paths
 # ---------------------------------------------------------------------------
 
-_HERE       = Path(__file__).resolve().parent.parent   # …/backend/
-_TEMP_INPUT = str(_HERE / "temp" / "input_video.mp4")
-_PPE_OUT    = str(_HERE / "temp" / "output" / "ppe_annotated.mp4")
-_POSE_OUT   = str(_HERE / "temp" / "output" / "pose_annotated.mp4")
+_HERE              = Path(__file__).resolve().parent.parent   # …/backend/
+_TEMP_INPUT        = str(_HERE / "temp" / "input_video.mp4")
+_PPE_OUT           = str(_HERE / "temp" / "output" / "ppe_annotated.mp4")
+_POSE_OUT          = str(_HERE / "temp" / "output" / "pose_annotated.mp4")
+_COMBINED_OUT      = str(_HERE / "temp" / "output" / "combined_annotated.mp4")
 
 (_HERE / "temp" / "output").mkdir(parents=True, exist_ok=True)
 
@@ -56,7 +58,7 @@ _POSE_OUT   = str(_HERE / "temp" / "output" / "pose_annotated.mp4")
 # Supported modes
 # ---------------------------------------------------------------------------
 
-_SUPPORTED_MODES = {"ppe", "pose", "sound"}
+_SUPPORTED_MODES = {"ppe", "pose", "sound", "combined"}
 
 _ALLOWED_EXTENSIONS = {".mp4", ".mpeg", ".mov", ".avi"}
 _ALLOWED_MIME = {
@@ -213,6 +215,13 @@ async def detect(
                 output_video_path = _POSE_OUT,
             )
 
+        elif mode == "combined":
+            result = process_combined_video(
+                video_path        = _TEMP_INPUT,
+                ppe_output_path   = _COMBINED_OUT,   # unused but kept for signature
+                pose_output_path  = _COMBINED_OUT,   # merged video written here
+            )
+
         elif mode == "sound":
             # Phase 3 placeholder — returns a structured stub so the
             # frontend can handle it gracefully without a 4xx error.
@@ -258,6 +267,8 @@ async def detect(
         result["video_output"] = "ppe_annotated.mp4"
     elif mode == "pose":
         result["video_output"] = "pose_annotated.mp4"
+    elif mode == "combined":
+        result["video_output"] = "combined_annotated.mp4"
 
     logger.info("[%s] detection complete — returning result.", mode.upper())
     return JSONResponse(content=result)
@@ -279,8 +290,9 @@ async def list_modes():
     """
     return {
         "modes": [
-            {"id": "ppe",   "label": "PPE Compliance Detection",   "status": "active"},
-            {"id": "pose",  "label": "Pose Safety Detection",       "status": "active"},
-            {"id": "sound", "label": "Anomaly Sound Detection",     "status": "coming_soon"},
+            {"id": "ppe",      "label": "PPE Compliance Detection",   "status": "active"},
+            {"id": "pose",     "label": "Pose Safety Detection",       "status": "active"},
+            {"id": "combined", "label": "PPE + Pose Detection",        "status": "active"},
+            {"id": "sound",    "label": "Anomaly Sound Detection",     "status": "coming_soon"},
         ]
     }

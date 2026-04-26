@@ -337,6 +337,7 @@ def extract_all_features(
     norm = normalize_keypoints(joints)
 
     return {
+        "pose_conf":        float(np.mean(kps_conf)),
         "back_angle":       buffers["back"].mean(),
         "knee_angle":       buffers["knee"].mean(),
         "neck_angle":       buffers["neck"].mean(),
@@ -405,70 +406,67 @@ def hybrid_classify(
     classifier,
     x_vec: np.ndarray,
 ) -> Tuple[int, float, str]:
-    """
-    Hybrid posture classifier combining strict geometric rules (primary)
-    and ML probability scores (secondary refinement).
-
-    Decision hierarchy:
-      1. Extreme cases are handled by geometric rule-based overrides FIRST.
-      2. For ambiguous cases, ML probability thresholds decide.
-      3. Default fallback: MODERATE.
-
-    Returns:
-        (label_id, confidence, decision_source)
-        label_id:         0=SAFE, 1=MODERATE, 2=UNSAFE
-        confidence:       float [0, 1]
-        decision_source:  'rule' or 'ml'
-    """
     ba = features.get("back_angle",  180.0)
     ka = features.get("knee_angle",  180.0)
     na = features.get("neck_angle",  180.0)
+    pose_conf = features.get("pose_conf", 1.0)
 
-    # ── GEOMETRIC OVERRIDES (non-negotiable) ───────────────────────────────
+    # 1. Print angles
+    print(f"Frame Debug:")
+    print(f"Back: {ba:.1f}")
+    print(f"Knee: {ka:.1f}")
+    print(f"Neck: {na:.1f}")
 
-    # 1. Extreme forward bend → UNSAFE (rule is always right here)
-    if ba < BACK_UNSAFE_LOW:
-        return 2, 0.92, "rule"
+    label = 1
+    conf_score = 0.50
+    source = "rule"
 
-    # 2. Bent back + locked knees → UNSAFE (classic bad lifting)
-    if ba < BACK_MODERATE_LOW and ka > KNEE_LOCKED:
-        return 2, 0.88, "rule"
+    # 2. Correct safe ranges
+    if ba > 140 and ka < 160 and na < 160:
+        label, conf_score, source = 0, 0.90, "rule"
+        print("→ SAFE")
+    elif 110 <= ba <= 140:
+        label, conf_score, source = 1, 0.85, "rule"
+        print("→ MODERATE")
+    else:
+        # 3. Remove hard override (temporarily)
+        # if ba < 110:
+        #     label, conf_score, source = 2, 0.90, "rule"
+        #     print("→ UNSAFE")
+        
+        # Fall back to ML if no rule matches
+        try:
+            if hasattr(classifier, "predict_proba"):
+                proba = classifier.predict_proba(x_vec)[0]
+                n_cls = len(proba)
+                prob_safe     = float(proba[0]) if n_cls > 0 else 0.0
+                prob_moderate = float(proba[1]) if n_cls > 1 else 0.0
+                prob_unsafe   = float(proba[2]) if n_cls > 2 else 0.0
 
-    # 3. Severe neck forward head → UNSAFE
-    if na < NECK_UNSAFE_LOW:
-        return 2, 0.85, "rule"
-
-    # 4. Proper lifting posture (straight back + bent knees) → SAFE
-    if ba > BACK_SAFE_MIN and KNEE_SQUAT_MIN <= ka <= KNEE_SQUAT_MAX:
-        return 0, 0.90, "rule"
-
-    # 5. Standing upright → SAFE
-    if ba > BACK_UPRIGHT and ka > KNEE_LOCKED:
-        return 0, 0.92, "rule"
-
-    # ── ML PROBABILITY-BASED DECISION (ambiguous zone) ─────────────────────
-    try:
-        if hasattr(classifier, "predict_proba"):
-            proba = classifier.predict_proba(x_vec)[0]
-            n_cls = len(proba)
-            prob_safe     = float(proba[0]) if n_cls > 0 else 0.0
-            prob_moderate = float(proba[1]) if n_cls > 1 else 0.0
-            prob_unsafe   = float(proba[2]) if n_cls > 2 else 0.0
-
-            if prob_unsafe > PROB_UNSAFE_THRESH:
-                return 2, prob_unsafe, "ml"
-            elif prob_safe > PROB_SAFE_THRESH:
-                return 0, prob_safe, "ml"
+                if prob_unsafe > PROB_UNSAFE_THRESH:
+                    label, conf_score, source = 2, prob_unsafe, "ml"
+                    print("→ UNSAFE (ML)")
+                elif prob_safe > PROB_SAFE_THRESH:
+                    label, conf_score, source = 0, prob_safe, "ml"
+                    print("→ SAFE (ML)")
+                else:
+                    conf_score = max(prob_safe, prob_moderate, prob_unsafe)
+                    label, source = 1, "ml"
+                    print("→ MODERATE (ML)")
             else:
-                # Argmax as tiebreaker but cap at MODERATE
-                conf = max(prob_safe, prob_moderate, prob_unsafe)
-                return 1, conf, "ml"
-        else:
-            raw = int(classifier.predict(x_vec)[0])
-            return raw, 0.75, "ml"
-    except Exception:
-        # If ML fails for any reason → default MODERATE (safe fallback)
-        return 1, 0.50, "rule"
+                label = int(classifier.predict(x_vec)[0])
+                conf_score, source = 0.75, "ml"
+        except Exception:
+            label, conf_score, source = 1, 0.50, "rule"
+            print("→ MODERATE (Fallback)")
+
+    # 5. Add confidence check
+    # If pose detection confidence is low: DO NOT classify as unsafe
+    if label == 2 and pose_conf < 0.60:
+        label = 1
+        print("→ Downgraded to MODERATE due to low pose confidence")
+
+    return label, conf_score, source
 
 
 # ---------------------------------------------------------------------------

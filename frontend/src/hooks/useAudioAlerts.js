@@ -42,6 +42,13 @@ export function useAudioAlerts() {
   const speakViolations = useCallback((violations) => {
     if (!enabledRef.current || !violations?.length) return;
 
+    // Combined-mode: if BOTH PPE and POSE types are present, fire a combined alert first
+    const types = new Set(violations.map(v => (v.type || '').toUpperCase()));
+    if (types.has('PPE') && types.has('POSE')) {
+      speak('Warning! Worker is unsafe due to missing PPE and bad posture. Take immediate corrective action.');
+      return; // One combined message is enough to avoid overloading
+    }
+
     // Build unique alert messages
     const seen = new Set();
     for (const v of violations) {
@@ -57,8 +64,8 @@ export function useAudioAlerts() {
         speak('Warning! Worker is not wearing protective gloves.');
       } else if (/back|posture|lifting/i.test(key)) {
         speak('Alert! Unsafe lifting posture detected.');
-      } else if (/knee/i.test(key)) {
-        speak('Warning! Unsafe knee bend detected.');
+      } else if (/knee|stiff/i.test(key)) {
+        speak('Warning! Unsafe knee posture detected.');
       } else if (/neck/i.test(key)) {
         speak('Warning! Unsafe neck posture detected.');
       } else {

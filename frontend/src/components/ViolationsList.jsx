@@ -33,6 +33,21 @@ export default function ViolationsList({ items }) {
             <li key={i} className={`viol-item sev-${v.severity ?? 'high'}`}>
               <span className="viol-frame">F{v.frame}</span>
               <div className="viol-body">
+                {v.type && (
+                  <span
+                    className="viol-item-tag"
+                    style={{
+                      background: v.type === 'PPE' ? 'var(--accent)22' : 'var(--warn)22',
+                      color:      v.type === 'PPE' ? 'var(--accent)'   : 'var(--warn)',
+                      border:     `1px solid ${v.type === 'PPE' ? 'var(--accent)' : 'var(--warn)'}44`,
+                      borderRadius: '4px',
+                      padding: '0 5px',
+                      fontSize: '0.68rem',
+                      fontWeight: 700,
+                      marginRight: '0.35rem',
+                    }}
+                  >{v.type}</span>
+                )}
                 <span className="viol-reason">{v.reason}</span>
                 {v.item && v.item !== v.reason && (
                   <span className="viol-item-tag">{v.item}</span>

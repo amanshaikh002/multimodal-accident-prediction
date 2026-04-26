@@ -134,12 +134,54 @@ export function enrichPoseViolations(violations = []) {
 }
 
 /**
+ * Map combined-mode violations (which already carry type + reason) to enriched entries.
+ * PPE violations go through PPE_MAP; Pose violations go through POSE_MAP.
+ * @param {Array} violations  — [{frame, type, reason, severity}]
+ * @returns {Array}           — [{frame, type, reason, suggestion, severity}]
+ */
+export function enrichCombinedViolations(violations = []) {
+  return violations.map((v) => {
+    const type   = (v.type   || 'PPE').toUpperCase();
+    const reason = v.reason  || '';
+    const frame  = v.frame   ?? '?';
+
+    if (type === 'PPE') {
+      // Try to match item name inside reason string
+      const itemMatch = Object.keys(PPE_MAP).find((k) =>
+        reason.toLowerCase().includes(k)
+      );
+      const info = itemMatch ? PPE_MAP[itemMatch] : {
+        reason:     reason || 'Missing PPE item',
+        suggestion: 'Ensure all required PPE is worn per site safety protocol.',
+        severity:   v.severity ?? 'high',
+      };
+      return { frame, type, item: reason, ...info, reason: info.reason || reason };
+    }
+
+    // POSE
+    const matched = POSE_MAP.find((m) => m.match.test(reason));
+    if (matched) {
+      const { match: _m, ...info } = matched;
+      return { frame, type, item: reason, ...info };
+    }
+    return {
+      frame,
+      type,
+      item:       reason,
+      reason:     reason || 'Unsafe posture detected',
+      suggestion: 'Consult an ergonomics specialist to review the workstation setup.',
+      severity:   v.severity ?? 'high',
+    };
+  });
+}
+
+/**
  * Derive an overall risk level from a safety/compliance score.
  * @param {number} score  0–100
  * @returns {"LOW"|"MEDIUM"|"HIGH"}
  */
 export function riskLevel(score) {
-  if (score >= 80) return "LOW";
-  if (score >= 50) return "MEDIUM";
-  return "HIGH";
+  if (score >= 80) return 'LOW';
+  if (score >= 50) return 'MEDIUM';
+  return 'HIGH';
 }

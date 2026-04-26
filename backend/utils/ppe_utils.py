@@ -68,81 +68,98 @@ def bbox_to_list(box_xyxy) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# 2b.  Bounding-box IoU (Intersection over Union)
+# 2b.  PPE assignment — center-point containment
 # ---------------------------------------------------------------------------
 
-def _box_iou(box1: List[float], box2: List[float]) -> float:
+# Why center-point and NOT IoU:
+#   A helmet bbox covers ~5% of a person bbox area.
+#   IoU(person, helmet) ≈ 0.04 — always below any reasonable threshold.
+#   The correct question is: "Is the PPE item centered inside the person box?"
+#   A helmet on a person's head will always have its center within the person's
+#   bounding box, so center-point containment is the reliable test.
+
+_MIN_DET_CONF: float = 0.50   # reject detections below this confidence
+
+
+def is_ppe_on_person(person_box: List[float], item_box: List[float]) -> bool:
     """
-    Compute IoU between two [x1, y1, x2, y2] bounding boxes.
-    Returns 0.0 if there is no overlap or either box is degenerate.
+    Return True when the CENTER of item_box lies inside person_box.
+
+    This is intentionally lenient: we only need the PPE item's midpoint
+    to fall within the person rectangle.  This correctly handles helmets
+    (small, near the top of the person box) and vests (larger, but still
+    centred on the torso which is always inside the person box).
+
+    Parameters
+    ----------
+    person_box : [x1, y1, x2, y2]
+    item_box   : [x1, y1, x2, y2]
     """
-    ix1 = max(box1[0], box2[0])
-    iy1 = max(box1[1], box2[1])
-    ix2 = min(box1[2], box2[2])
-    iy2 = min(box1[3], box2[3])
-
-    inter_w = max(0.0, ix2 - ix1)
-    inter_h = max(0.0, iy2 - iy1)
-    inter   = inter_w * inter_h
-    if inter == 0.0:
-        return 0.0
-
-    area1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
-    area2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
-    union = area1 + area2 - inter
-    return inter / union if union > 0.0 else 0.0
-
-
-# IoU threshold for a PPE item to count as "on" a person
-_IOU_PPE_THRESHOLD: float = 0.05
-# Minimum detection confidence to include any detection (Part 7)
-_MIN_DET_CONF: float = 0.50
+    px1, py1, px2, py2 = person_box
+    ix1, iy1, ix2, iy2 = item_box
+    cx = (ix1 + ix2) / 2.0
+    cy = (iy1 + iy2) / 2.0
+    return (px1 < cx < px2) and (py1 < cy < py2)
 
 
 def evaluate_frame_safety(
     detections: List[Dict[str, Any]]
 ) -> Tuple[bool, List[str]]:
     """
-    Given the detections for one frame, decide if each visible person
-    is wearing the REQUIRED_PPE items, verified by bounding-box IoU overlap.
+    Decide per-person PPE compliance using center-point containment.
 
-    A PPE item is considered "worn" only if its bbox has IoU > _IOU_PPE_THRESHOLD
-    with the person's bbox AND its detection confidence >= _MIN_DET_CONF.
+    A PPE item is considered "worn" by a person when:
+      1. Its detection confidence >= _MIN_DET_CONF (0.50)
+      2. The CENTER of its bounding box lies INSIDE the person's bounding box
+
+    If NO person is visible in the frame → safe (nothing to check).
+    If ANY person is missing required PPE  → unsafe.
 
     Returns
     -------
     (is_safe, missing_items)
-        is_safe      – True if all required PPE detected on the person
-        missing_items – list of required labels that were absent / not overlapping
     """
-    # Filter out low-confidence detections first (Part 7: conf >= 0.50)
+    # ── 1. Drop low-confidence detections ────────────────────────────────────
     dets = [d for d in detections if d["confidence"] >= _MIN_DET_CONF]
 
-    found_labels = {det["label"] for det in dets}
-    has_human    = "human" in found_labels
-
-    # No person in frame → treat as safe (no violation to log)
+    has_human = any(d["label"] == "human" for d in dets)
     if not has_human:
+        # No person visible → treat as safe (no one to check)
         return True, []
 
-    # Collect all person boxes and PPE boxes
+    # ── 2. Separate person boxes and PPE boxes ────────────────────────────────
     person_boxes = [d["bbox"] for d in dets if d["label"] == "human"]
-    ppe_boxes: Dict[str, List[List[float]]] = {item: [] for item in REQUIRED_PPE}
-    for d in dets:
-        if d["label"] in REQUIRED_PPE:
-            ppe_boxes[d["label"]].append(d["bbox"])
 
-    # For each person, check whether required PPE overlaps their bbox.
-    # If ANY person is missing PPE, the frame is unsafe.
+    helmet_boxes = [d["bbox"] for d in dets if d["label"] == "helmet"]
+    vest_boxes   = [d["bbox"] for d in dets if d["label"] == "vest"]
+
+    # Debug info
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    _logger.debug(
+        "[PPE] persons=%d  helmets=%d  vests=%d",
+        len(person_boxes), len(helmet_boxes), len(vest_boxes),
+    )
+
+    # ── 3. Per-person assignment via center-point containment ─────────────────
     missing_set: set = set()
-    for person_box in person_boxes:
-        for ppe_item, boxes in ppe_boxes.items():
-            worn = any(_box_iou(person_box, pb) > _IOU_PPE_THRESHOLD for pb in boxes)
-            if not worn:
-                missing_set.add(ppe_item)
 
-    missing = sorted(missing_set)
-    is_safe = len(missing) == 0
+    for person_box in person_boxes:
+        helmet_on = any(is_ppe_on_person(person_box, hb) for hb in helmet_boxes)
+        vest_on   = any(is_ppe_on_person(person_box, vb) for vb in vest_boxes)
+
+        _logger.debug(
+            "[PPE] person %s → helmet=%s  vest=%s",
+            [int(v) for v in person_box], helmet_on, vest_on,
+        )
+
+        if not helmet_on:
+            missing_set.add("helmet")
+        if not vest_on:
+            missing_set.add("vest")
+
+    missing  = sorted(missing_set)
+    is_safe  = len(missing) == 0
     return is_safe, missing
 
 

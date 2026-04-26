@@ -24,9 +24,9 @@ The project leverages a modern, decoupled technology stack designed for high-thr
     *   **Pandas & NumPy:** Handles high-speed vector mathematics and large-scale dataset transformations.
     *   **Imbalanced-Learn (SMOTE):** Addresses real-world data scarcity by generating synthetic minority examples.
 *   **Backend & API Layer:** 
-    *   **FastAPI & Uvicorn:** Provides an asynchronous, microservice-based REST API capable of concurrent request handling without blocking the event loop.
+    *   **FastAPI & Uvicorn:** Provides an asynchronous, microservice-based REST API. Features modular routing (`ppe`, `pose`, and `combined` endpoints) capable of concurrent request handling without blocking the event loop.
 *   **Frontend Interface:** 
-    *   **React.js / Vite:** A dynamic, component-based dashboard that visualizes JSON analytics and streams the annotated video feeds to safety managers in real-time.
+    *   **React.js / Vite:** A fully integrated, component-based professional dashboard that visualizes JSON analytics and streams the combined annotated video feeds to safety managers in real-time.
 
 ### 1.4 System Architecture & Pipeline Flow
 The framework is designed around a **Microservice-oriented** architecture, intentionally separating the heavy computational ML workloads from the user interface. This guarantees that UI rendering never bottlenecks the AI inference loop.
@@ -34,9 +34,10 @@ The framework is designed around a **Microservice-oriented** architecture, inten
 **The Data Pipeline Flow:**
 1.  **Ingestion:** Raw video feeds (either via uploaded MP4 files or simulated CCTV streams) are ingested by the FastAPI backend.
 2.  **Preprocessing & Frame Skipping:** To maintain real-time performance (aiming for effective 15-30 FPS processing), the system implements dynamic striding (e.g., skipping every alternating frame) and bilinear downscaling (resizing high-definition 4K video to a standard 640x480 inference resolution).
-3.  **Parallel Inference Pipelines:** The preprocessed frame is routed to specific detection modules:
-    *   **Module A (PPE):** The custom YOLOv8 model scans for human bounding boxes and cross-references them with detected safety gear (helmets, vests) using spatial intersection logic.
-    *   **Module B (Ergonomics):** A YOLOv8-pose model extracts a 17-point skeletal map. Vector mathematics computes kinematic joint angles and temporal velocities. The XGBoost classifier predicts the ergonomic risk level.
+3.  **Parallel & Combined Inference Pipelines:** The preprocessed frame is routed to specific detection modules or a unified combined engine:
+    *   **Module A (PPE Service):** The custom YOLOv8 model scans for human bounding boxes and validates safety gear using strict center-point containment logic.
+    *   **Module B (Ergonomics Service):** A YOLOv8-pose model extracts a 17-point skeletal map. Vector mathematics computes kinematic joint angles and temporal velocities. The XGBoost classifier predicts the ergonomic risk level.
+    *   **Module C (Combined Service):** Synchronously runs both Module A and Module B on the exact same frame, merging bounding boxes and skeletal joints into a single, uncluttered visual output and comprehensive JSON metric report.
 4.  **Temporal Stabilization:** Raw AI predictions are inherently noisy. The system routes predictions through a sliding-window temporal memory buffer (Majority Voting) to eliminate false positives and UI flickering.
 5.  **Feedback & Output Generation:** 
     *   If a violation persists past the safety threshold, asynchronous Text-to-Speech (TTS) alerts are fired.
@@ -59,15 +60,16 @@ Processing every single frame of a 30 FPS (frames per second) video is too slow 
 *   **Formula:** `Processed Frame = Frame Index modulo 2 == 0`
 *   Before processing, the image is resized to 640x480 pixels. This drastically reduces the computation time while keeping enough detail to spot safety gear.
 
-### 1.2 PPE Compliance Logic (Intersection Algorithm)
-To prove a worker is wearing gear, the AI can't just detect a helmet in the background; it must prove the helmet is ON the worker.
-*   **Logic:** We use a "Bounding Box Intersection" check.
+### 1.2 PPE Compliance Logic (Center-Point Containment Algorithm)
+To prove a worker is wearing gear, the AI can't just detect a helmet in the background or floating near the worker; it must definitively prove the gear belongs to that specific worker. Previous "Area Overlap" methods caused false positives in crowded environments. We now use precise geometric containment.
+*   **Logic:** Center-Point Bounding Box Containment.
 *   **Algorithm:** 
     1. Find a "Human" bounding box.
-    2. Check if a "Helmet" bounding box overlaps (intersects) with the Human box.
-    3. Check if a "Vest" bounding box overlaps with the Human box.
+    2. For every detected "Helmet", calculate its exact geometric center point `(x_center, y_center)`.
+    3. Check if that exact center point falls inside the spatial coordinates of the Human bounding box.
+    4. Repeat for "Vest".
 *   **Compliance Formula:** 
-    `Is Compliant = (Human box overlaps Helmet box) AND (Human box overlaps Vest box)`
+    `Is Compliant = (Helmet Center is inside Human Box) AND (Vest Center is inside Human Box)`
 
 ---
 
@@ -157,3 +159,19 @@ When the system runs live, the AI's prediction goes through a safety filter to p
     *   *Logic:* If `Back Angle < 110 degrees` (worker is bent entirely in half) OR `Back Velocity < -12.0` (worker bent down incredibly fast), force an immediate UNSAFE alert.
 3.  **Temporal Majority Voting (Smoothing):** To prevent the UI from flickering back and forth between Safe and Unsafe every millisecond, we use a 5-frame memory.
     *   *Logic:* The system looks at the last 5 frames and picks the most frequent prediction (the Mode). If the last 5 frames were [Safe, Unsafe, Unsafe, Unsafe, Safe], the final output is Unsafe.
+
+---
+
+## 6. Combined Multimodal Safety Engine (Implemented)
+
+The most recent architectural addition is the **Combined Safety Engine** which merges the previously independent PPE and Pose modules into a single synchronized pipeline. 
+
+### 6.1 Synchronous Multi-Model Inference
+Instead of processing a video twice, the frame is passed through both the `ppe_model.pt` and `yolov8n-pose.pt` concurrently.
+*   The models generate distinct predictions (bounding boxes for gear, keypoints for skeletons).
+*   The outputs are mapped to the same coordinate space.
+
+### 6.2 Clutter-Free Visualization Algorithm
+Drawing bounding boxes, confidence scores, text labels, skeletons, and risk meters on a single frame can cause severe visual overload.
+*   **Logic:** The combined engine intelligently minimizes UI elements. For example, it only draws the skeletal mesh, using a color-coded bounding box to represent overall safety (Red for Unsafe posture/missing PPE, Green for Safe). 
+*   **Metrics Aggregation:** Generates a unified JSON payload containing both PPE compliance percentages and Posture risk ratios, directly feeding the React Dashboard's real-time graphs.

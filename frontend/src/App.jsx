@@ -4,9 +4,10 @@ import {
   TriangleAlert, CheckCircle2, Wifi
 } from 'lucide-react';
 import './App.css';
-import { enrichPpeViolations, enrichPoseViolations } from './suggestionMap';
+import { enrichPpeViolations, enrichPoseViolations, enrichCombinedViolations } from './suggestionMap';
 import VideoPanel       from './components/VideoPanel';
 import AnalysisPanel    from './components/AnalysisPanel';
+import CombinedPanel    from './components/CombinedPanel';
 import ViolationsList   from './components/ViolationsList';
 import Recommendations  from './components/Recommendations';
 import { useAudioAlerts } from './hooks/useAudioAlerts';
@@ -62,13 +63,17 @@ export default function App() {
       
       setResult({ mode, data });
       // Set the dynamic video URL returned/hosted by backend
-      const generatedFile = data.video_output || (mode === 'ppe' ? 'ppe_annotated.mp4' : 'pose_annotated.mp4');
+      const generatedFile = data.video_output ||
+        (mode === 'ppe' ? 'ppe_annotated.mp4' :
+         mode === 'combined' ? 'combined_annotated.mp4' :
+         'pose_annotated.mp4');
       setVideoUrl(`${API}/output/${generatedFile}?t=${Date.now()}`);
 
       // Trigger audio alerts for violations found
-      const enriched = mode === 'ppe'
-        ? enrichPpeViolations(data.violations ?? [])
-        : enrichPoseViolations(data.violations ?? []);
+      const enriched =
+        mode === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
+        mode === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
+                              enrichPoseViolations(data.violations ?? []);
       speakViolations(enriched);
 
     } catch (err) {
@@ -84,11 +89,15 @@ export default function App() {
 
   if (result) {
     const { mode: m, data } = result;
-    violations  = m === 'ppe'
-      ? enrichPpeViolations(data.violations ?? [])
-      : enrichPoseViolations(data.violations ?? []);
-    const score = m === 'ppe' ? (data.compliance_score ?? 0) : (data.safety_score ?? 0);
-    overallSafe = score >= 70;
+    violations =
+      m === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
+      m === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
+                         enrichPoseViolations(data.violations ?? []);
+    const score =
+      m === 'ppe'      ? (data.compliance_score ?? 0) :
+      m === 'combined' ? Math.min(data.ppe_score ?? 0, data.pose_score ?? 0) :
+                         (data.safety_score ?? 0);
+    overallSafe = score >= 70 && (m !== 'combined' || data.final_status === 'SAFE');
   }
 
   /* ── Render ────────────────────────────────────────────────────────────── */
@@ -144,6 +153,7 @@ export default function App() {
             >
               <option value="ppe">PPE Compliance Detection</option>
               <option value="pose">Pose Safety Detection</option>
+              <option value="combined">PPE + Pose Detection</option>
               <option value="sound" disabled>Sound Detection (coming soon)</option>
             </select>
           </div>
@@ -221,7 +231,9 @@ export default function App() {
 
               {/* RIGHT: Analysis Panels */}
               <div className="col-right">
-                <AnalysisPanel mode={result.mode} data={result.data} />
+                {result.mode === 'combined'
+                  ? <CombinedPanel data={result.data} />
+                  : <AnalysisPanel mode={result.mode} data={result.data} />}
                 <ViolationsList items={violations} />
                 <Recommendations items={violations} />
               </div>
