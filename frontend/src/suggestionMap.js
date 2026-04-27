@@ -210,3 +210,43 @@ export function enrichFireViolations(data = {}) {
     },
   ];
 }
+
+/**
+ * Build a violation list for an anomaly-sound detection result.
+ * The sound service returns events (each with start_sec / end_sec / confidence)
+ * rather than per-frame violations, so we synthesize one enriched entry per event.
+ *
+ * @param {Object} data  — full sound result from the backend
+ * @returns {Array}      — [{item, reason, suggestion, severity}]
+ */
+export function enrichSoundViolations(data = {}) {
+  const status = data.status ?? 'SAFE';
+  if (status !== 'UNSAFE') return [];
+
+  const events = data.events ?? [];
+
+  if (events.length === 0) {
+    // UNSAFE but no concrete events (e.g. ratio over threshold without
+    // sustained event) — emit a single summary entry.
+    const ratio = (data.anomaly_ratio ?? 0) * 100;
+    return [{
+      item:       'Anomalous Sound',
+      reason:     `Anomalous audio in ${ratio.toFixed(1)}% of analysed windows`,
+      suggestion: 'Inspect equipment for abnormal mechanical sounds (grinding, hissing, banging).',
+      severity:   'medium',
+    }];
+  }
+
+  return events.map((ev) => {
+    const start = (ev.start_sec ?? 0).toFixed(1);
+    const end   = (ev.end_sec   ?? 0).toFixed(1);
+    const dur   = (ev.duration_sec ?? (ev.end_sec - ev.start_sec)).toFixed(1);
+    const prob  = ((ev.max_anomaly_prob ?? ev.max_confidence ?? 0) * 100).toFixed(0);
+    return {
+      item:       'Anomalous Sound',
+      reason:     `Abnormal audio from ${start}s to ${end}s (${dur}s, max ${prob}%)`,
+      suggestion: 'Pause work in the area, inspect machinery for failure modes, and confirm worker safety.',
+      severity:   (ev.duration_sec ?? 0) >= 2 ? 'high' : 'medium',
+    };
+  });
+}

@@ -13,7 +13,11 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('backend/services/fire_service.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('backend/services/fire_service.py', doraise=True\\); print\\('compile OK'\\)\")",
       "WebSearch",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(node --check src/App.jsx)",
+      "Bash(npx --no-install eslint src/App.jsx src/components/SoundPanel.jsx src/suggestionMap.js)",
+      "Bash(npx --no-install eslint src/components/FirePanel.jsx)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('backend/services/sound_service.py', doraise=True\\); print\\('compile OK'\\)\")"
     ]
   }
 }

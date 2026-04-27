@@ -4,11 +4,18 @@ import {
   TriangleAlert, CheckCircle2, Flame
 } from 'lucide-react';
 import './App.css';
-import { enrichPpeViolations, enrichPoseViolations, enrichCombinedViolations, enrichFireViolations } from './suggestionMap';
+import {
+  enrichPpeViolations,
+  enrichPoseViolations,
+  enrichCombinedViolations,
+  enrichFireViolations,
+  enrichSoundViolations,
+} from './suggestionMap';
 import VideoPanel       from './components/VideoPanel';
 import AnalysisPanel    from './components/AnalysisPanel';
 import CombinedPanel    from './components/CombinedPanel';
 import FirePanel        from './components/FirePanel';
+import SoundPanel       from './components/SoundPanel';
 import AllPanel         from './components/AllPanel';
 import ViolationsList   from './components/ViolationsList';
 import Recommendations  from './components/Recommendations';
@@ -70,6 +77,7 @@ export default function App() {
         (mode === 'ppe'      ? 'ppe_annotated.mp4'      :
          mode === 'combined' ? 'combined_annotated.mp4' :
          mode === 'fire'     ? 'fire_annotated.mp4'     :
+         mode === 'sound'    ? 'sound_annotated.mp4'    :
          mode === 'all'      ? 'fire_annotated.mp4'     :
          'pose_annotated.mp4');
       // Cache-bust so the browser always fetches the newly written file
@@ -80,18 +88,25 @@ export default function App() {
         mode === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
         mode === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
         mode === 'fire'     ? enrichFireViolations(data) :
+        mode === 'sound'    ? enrichSoundViolations(data) :
         mode === 'all'      ? enrichCombinedViolations(data.violations ?? []) :
                               enrichPoseViolations(data.violations ?? []);
       speakViolations(enriched);
 
-      // ── Fire-specific urgent voice alert ────────────────────────────────
+      // ── Module-specific urgent voice alerts ─────────────────────────────
       // speak() is called directly (bypassing speakViolations) so the alert
-      // fires even when fire_frames is very low and the violations list is empty.
+      // fires even when the violations list is empty.
       if (mode === 'fire' && data.status === 'UNSAFE') {
         speak('Warning! Fire detected in the workplace. Evacuate immediately and call emergency services.');
       }
+      if (mode === 'sound' && data.status === 'UNSAFE') {
+        speak('Warning! Anomalous machine sounds detected. Inspect the equipment immediately.');
+      }
       if (mode === 'all' && data.fire_detected) {
         speak('Warning! Fire detected in the workplace. Evacuate immediately.');
+      }
+      if (mode === 'all' && data.sound_status === 'UNSAFE') {
+        speak('Warning! Anomalous machine sounds detected.');
       }
 
     } catch (err) {
@@ -111,9 +126,10 @@ export default function App() {
       m === 'ppe'      ? enrichPpeViolations(data.violations ?? []) :
       m === 'combined' ? enrichCombinedViolations(data.violations ?? []) :
       m === 'fire'     ? enrichFireViolations(data) :
+      m === 'sound'    ? enrichSoundViolations(data) :
       m === 'all'      ? enrichCombinedViolations(data.violations ?? []) :
                          enrichPoseViolations(data.violations ?? []);
-    if (m === 'fire') {
+    if (m === 'fire' || m === 'sound') {
       overallSafe = data.status === 'SAFE';
     } else if (m === 'all') {
       overallSafe = data.final_status === 'SAFE';
@@ -180,9 +196,9 @@ export default function App() {
               <option value="ppe">🦺 PPE Compliance Detection</option>
               <option value="pose">🧍 Pose Safety Detection</option>
               <option value="fire">🔥 Fire Hazard Detection</option>
+              <option value="sound">🔊 Anomaly Sound Detection</option>
               <option value="combined">🔗 PPE + Pose Detection</option>
-              <option value="all">🚀 Full Platform (PPE + Pose + Fire)</option>
-              <option value="sound" disabled>🔊 Sound Detection (coming soon)</option>
+              <option value="all">🚀 Full Platform (PPE + Pose + Fire + Sound)</option>
             </select>
           </div>
 
@@ -263,6 +279,8 @@ export default function App() {
                   ? <CombinedPanel data={result.data} />
                   : result.mode === 'fire'
                   ? <FirePanel data={result.data} />
+                  : result.mode === 'sound'
+                  ? <SoundPanel data={result.data} />
                   : result.mode === 'all'
                   ? <AllPanel data={result.data} />
                   : <AnalysisPanel mode={result.mode} data={result.data} />}

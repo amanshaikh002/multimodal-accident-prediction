@@ -43,7 +43,7 @@ from routes.detect import detect_router          # unified  (PRIMARY)
 from routes.ppe    import ppe_router             # legacy   (deprecated)
 from routes.pose   import pose_router            # legacy   (deprecated)
 from routes.fire   import fire_router            # legacy   (deprecated)
-# from routes.sound import sound_router          # Phase 3 — uncomment when ready
+from routes.sound  import sound_router           # legacy   (deprecated)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -65,14 +65,13 @@ app = FastAPI(
     description=(
         "Modular AI-powered safety detection backend.\n\n"
         "## Primary Endpoint (recommended)\n"
-        "- 🎯 **Unified Detection** — `POST /detect?mode=<ppe|pose|fire|combined|all|sound>`\n"
+        "- 🎯 **Unified Detection** — `POST /detect?mode=<ppe|pose|fire|sound|combined|all>`\n"
         "- 📋 **List Modes** — `GET /detect/modes`\n\n"
         "## Legacy Endpoints *(deprecated)*\n"
         "- 🦺 PPE Detection — `POST /detect/ppe`\n"
         "- 🧍 Pose Safety Detection — `POST /detect/pose`\n"
-        "- 🔥 Fire Hazard Detection — `POST /detect/fire`\n\n"
-        "## Coming Soon\n"
-        "- 🔊 Anomaly Sound Detection — `POST /detect?mode=sound`"
+        "- 🔥 Fire Hazard Detection — `POST /detect/fire`\n"
+        "- 🔊 Anomaly Sound Detection — `POST /detect/sound`"
     ),
     version="3.1.0",
     docs_url="/docs",
@@ -112,7 +111,7 @@ app.include_router(detect_router)
 app.include_router(ppe_router)
 app.include_router(pose_router)
 app.include_router(fire_router)
-# app.include_router(sound_router)
+app.include_router(sound_router)
 
 # ---------------------------------------------------------------------------
 # Static files — serve annotated output videos to the frontend
@@ -140,21 +139,22 @@ async def root():
 async def health():
     return {
         "status":  "healthy",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "modules": {
             "ppe_detection":   "active",
             "pose_detection":  "active",
             "fire_detection":  "active",
+            "sound_detection": "active",
             "combined_mode":   "active",
             "all_mode":        "active",
-            "anomaly_sound":   "coming_soon",
         },
         "endpoints": {
-            "unified":      "POST /detect?mode=<module>   ← recommended",
+            "unified":      "POST /detect?mode=<module>   <- recommended",
             "list_modes":   "GET  /detect/modes",
-            "legacy_ppe":   "POST /detect/ppe            ← deprecated",
-            "legacy_pose":  "POST /detect/pose           ← deprecated",
-            "legacy_fire":  "POST /detect/fire           ← deprecated",
+            "legacy_ppe":   "POST /detect/ppe            <- deprecated",
+            "legacy_pose":  "POST /detect/pose           <- deprecated",
+            "legacy_fire":  "POST /detect/fire           <- deprecated",
+            "legacy_sound": "POST /detect/sound          <- deprecated",
         },
     }
 

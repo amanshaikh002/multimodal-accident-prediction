@@ -622,15 +622,21 @@ def _pose_status(r: Dict) -> str:
     return "UNSAFE"
 
 
-def _final_status(ppe_st: str, pose_st: str, accident_st: str = "SAFE") -> str:
+def _final_status(
+    ppe_st:      str,
+    pose_st:     str,
+    accident_st: str = "SAFE",
+    sound_st:    str = "SAFE",
+) -> str:
     """
     Internal status reducer (no fire signal). Used by merge_results when
-    only PPE + Pose are being merged.
+    only PPE + Pose are being merged. Sound + Accident are optional.
 
     Priority (highest -> lowest):
         CRITICAL   - accident_st is CRITICAL (worker fall / trapped / etc.)
         HIGH RISK  - both PPE and Pose are UNSAFE
-        UNSAFE     - PPE or Pose is UNSAFE, or accident_st is WARN
+        UNSAFE     - PPE or Pose is UNSAFE, or accident_st is WARN,
+                     or sound_st is UNSAFE
         MODERATE   - Pose is MODERATE only
         SAFE       - all clear
     """
@@ -638,7 +644,12 @@ def _final_status(ppe_st: str, pose_st: str, accident_st: str = "SAFE") -> str:
         return "CRITICAL"
     if ppe_st == "UNSAFE" and pose_st == "UNSAFE":
         return "HIGH RISK"
-    if ppe_st == "UNSAFE" or pose_st == "UNSAFE" or accident_st == "WARN":
+    if (
+        ppe_st  == "UNSAFE"
+        or pose_st == "UNSAFE"
+        or accident_st == "WARN"
+        or sound_st    == "UNSAFE"
+    ):
         return "UNSAFE"
     if pose_st == "MODERATE":
         return "MODERATE"
@@ -650,22 +661,23 @@ def get_final_status(
     pose_status:     str,
     fire_status:     str,
     accident_status: str = "SAFE",
+    sound_status:    str = "SAFE",
 ) -> str:
     """
     Unified Decision Engine — derives the single worst-case status
-    across all four modules.
+    across all five modules.
 
     Priority (highest -> lowest):
         CRITICAL   - fire is UNSAFE OR accident is CRITICAL
                      (immediate evacuation OR worker emergency)
         HIGH RISK  - both PPE and Pose are UNSAFE
-        UNSAFE     - PPE or Pose is UNSAFE, or accident is WARN
-                     (impact / stumble that didn't fully fall)
+        UNSAFE     - PPE or Pose is UNSAFE, or accident is WARN,
+                     or sound is UNSAFE
         MODERATE   - Pose is MODERATE only
         SAFE       - all modules report SAFE
 
-    Backward compatible: callers that don't pass ``accident_status`` get
-    the original 3-module behavior.
+    Backward compatible: callers that omit accident_status / sound_status
+    get the original behaviour (those default to SAFE).
     """
     if fire_status == "UNSAFE" or accident_status == "CRITICAL":
         return "CRITICAL"
@@ -675,6 +687,7 @@ def get_final_status(
         ppe_status  == "UNSAFE"
         or pose_status == "UNSAFE"
         or accident_status == "WARN"
+        or sound_status    == "UNSAFE"
     ):
         return "UNSAFE"
     if ppe_status == "MODERATE" or pose_status == "MODERATE":

@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from services.ppe_service      import run_ppe_detection
 from services.pose_service     import process_pose_video
 from services.fire_service     import process_fire_video
+from services.sound_service    import process_sound_video
 from services.combined_service import process_combined_video, get_final_status
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ _TEMP_INPUT        = str(_HERE / "temp" / "input_video.mp4")
 _PPE_OUT           = str(_HERE / "temp" / "output" / "ppe_annotated.mp4")
 _POSE_OUT          = str(_HERE / "temp" / "output" / "pose_annotated.mp4")
 _FIRE_OUT          = str(_HERE / "temp" / "output" / "fire_annotated.mp4")
+_SOUND_OUT         = str(_HERE / "temp" / "output" / "sound_annotated.mp4")
 _COMBINED_OUT      = str(_HERE / "temp" / "output" / "combined_annotated.mp4")
 _ALL_OUT           = str(_HERE / "temp" / "output" / "all_annotated.mp4")
 
@@ -236,8 +238,8 @@ async def detect(
             )
 
         elif mode == "all":
-            # Full platform: PPE + Pose + Fire — run sequentially, merge results
-            logger.info("[ALL] Running full platform analysis (PPE + Pose + Fire)...")
+            # Full platform: PPE + Pose + Fire + Sound — run sequentially, merge results
+            logger.info("[ALL] Running full platform analysis (PPE + Pose + Fire + Sound)...")
             ppe_result = run_ppe_detection(
                 video_path        = _TEMP_INPUT,
                 output_video_path = None,          # metrics only
@@ -250,16 +252,31 @@ async def detect(
                 video_path        = _TEMP_INPUT,
                 output_video_path = _FIRE_OUT,     # annotated fire video as primary output
             )
+            try:
+                sound_result = process_sound_video(
+                    video_path        = _TEMP_INPUT,
+                    output_video_path = None,      # metrics only in 'all' mode
+                )
+            except Exception as exc:
+                # Don't let a failed audio extraction kill the whole report.
+                logger.warning("[ALL] Sound module failed (non-fatal): %s", exc)
+                sound_result = {
+                    "status": "SAFE", "anomaly_ratio": 0.0,
+                    "anomaly_windows": 0, "total_windows": 0,
+                    "events": [], "message": f"Sound analysis skipped: {exc}",
+                }
+
             # Derive module statuses
             ppe_status      = "SAFE" if (ppe_result.get("compliance_score", 0) >= 70) else "UNSAFE"
             pose_st_raw     = pose_result.get("safety_score", 0)
             pose_status     = "SAFE" if pose_st_raw >= 80 else ("MODERATE" if pose_st_raw >= 50 else "UNSAFE")
-            fire_status     = fire_result.get("status", "SAFE")
+            fire_status     = fire_result.get("status",  "SAFE")
+            sound_status    = sound_result.get("status", "SAFE")
             accident_status = pose_result.get("accident_status", "SAFE")
             accident_events = pose_result.get("accident_events", [])
 
             final_status = get_final_status(
-                ppe_status, pose_status, fire_status, accident_status,
+                ppe_status, pose_status, fire_status, accident_status, sound_status,
             )
 
             result = {
@@ -268,12 +285,17 @@ async def detect(
                 "ppe_status":       ppe_status,
                 "pose_status":      pose_status,
                 "fire_status":      fire_status,
+                "sound_status":     sound_status,
                 "accident_status":  accident_status,
                 "accident_events":  accident_events,
                 "ppe_score":        ppe_result.get("compliance_score", 0.0),
                 "pose_score":       pose_result.get("safety_score",    0.0),
                 "fire_ratio":       fire_result.get("fire_ratio",      0.0),
                 "fire_frames":      fire_result.get("fire_frames",     0),
+                "anomaly_ratio":    sound_result.get("anomaly_ratio",  0.0),
+                "anomaly_windows":  sound_result.get("anomaly_windows", 0),
+                "sound_events":     sound_result.get("events",         []),
+                "sound_message":    sound_result.get("message",        ""),
                 "total_frames":     max(
                     ppe_result.get("total_frames",  0),
                     pose_result.get("total_frames", 0),
@@ -284,16 +306,10 @@ async def detect(
             }
 
         elif mode == "sound":
-            # Phase 3 placeholder — returns a structured stub so the
-            # frontend can handle it gracefully without a 4xx error.
-            result = {
-                "status":  "coming_soon",
-                "mode":    "sound",
-                "message": (
-                    "Anomaly sound detection is not yet implemented. "
-                    "It will be available in Phase 3."
-                ),
-            }
+            result = process_sound_video(
+                video_path        = _TEMP_INPUT,
+                output_video_path = _SOUND_OUT,
+            )
 
     except FileNotFoundError as exc:
         # Model weights or video file missing
@@ -330,6 +346,10 @@ async def detect(
         result["video_output"] = "pose_annotated.mp4"
     elif mode == "fire":
         result["video_output"] = "fire_annotated.mp4"
+    elif mode == "sound":
+        # Sound has no real annotation; the service copied the input video
+        # so the frontend has something to play with synchronised audio.
+        result["video_output"] = result.get("output_video") or "sound_annotated.mp4"
     elif mode == "combined":
         result["video_output"] = "combined_annotated.mp4"
     elif mode == "all":
@@ -355,11 +375,11 @@ async def list_modes():
     """
     return {
         "modes": [
-            {"id": "ppe",      "label": "PPE Compliance Detection",        "status": "active"},
-            {"id": "pose",     "label": "Pose Safety Detection",            "status": "active"},
-            {"id": "fire",     "label": "Fire Hazard Detection",            "status": "active"},
-            {"id": "combined", "label": "PPE + Pose Detection",             "status": "active"},
-            {"id": "all",      "label": "Full Platform (PPE + Pose + Fire)", "status": "active"},
-            {"id": "sound",    "label": "Anomaly Sound Detection",          "status": "coming_soon"},
+            {"id": "ppe",      "label": "PPE Compliance Detection",                "status": "active"},
+            {"id": "pose",     "label": "Pose Safety Detection",                    "status": "active"},
+            {"id": "fire",     "label": "Fire Hazard Detection",                    "status": "active"},
+            {"id": "sound",    "label": "Anomaly Sound Detection",                  "status": "active"},
+            {"id": "combined", "label": "PPE + Pose Detection",                     "status": "active"},
+            {"id": "all",      "label": "Full Platform (PPE + Pose + Fire + Sound)", "status": "active"},
         ]
     }
