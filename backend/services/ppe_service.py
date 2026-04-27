@@ -66,6 +66,15 @@ _SAVE_VIDEO    = True       # write annotated output video?
 # (not SAFE). At stride 2 / 25 fps source ≈ 25 frames ≈ 2 s of grace.
 _OCCLUSION_GRACE_FRAMES = 25
 
+# Sticky-PPE smoothing — the trained PPE YOLO has poor recall on bent /
+# crouched / non-frontal poses; it routinely loses the helmet or vest box
+# for a handful of frames mid-motion. If a required item was detected on a
+# visible worker within the last _PPE_STICKY_FRAMES processed frames, we
+# treat it as still worn and don't flip to UNSAFE on a momentary miss.
+# At stride 2 / 25 fps source ≈ 18 frames ≈ 1.5 s of grace per item.
+# Set to 0 to disable smoothing.
+_PPE_STICKY_FRAMES = 18
+
 # ---------------------------------------------------------------------------
 # Open-vocabulary hazard detection (YOLO-World)
 # ---------------------------------------------------------------------------
@@ -80,7 +89,31 @@ _HAZARD_PROMPTS:   list   = [
     "fallen person",
     "falling object",
 ]
-_HAZARD_CONF:      float  = 0.25     # confidence floor for hazard detections
+# Per-class confidence floor. Open-vocab grounding is unreliable on the
+# "fallen person" prompt — a bending or crouching worker often matches at
+# moderate confidence — so we hold it to a much higher bar than the static
+# debris classes. Other prompts can stay permissive.
+_HAZARD_CONF: Dict[str, float] = {
+    "falling rock":   0.30,
+    "loose brick":    0.30,
+    "debris":         0.30,
+    "fallen person":  0.55,
+    "falling object": 0.35,
+}
+_HAZARD_CONF_DEFAULT: float = 0.30
+
+# A genuinely fallen person's bbox is wider than tall. Bending, crouching,
+# and squatting workers are still taller than wide. Requiring w/h >= this
+# ratio kills the "bending worker tagged as fallen" false positive without
+# needing any retraining.
+_FALLEN_PERSON_MIN_AR: float = 1.2
+
+# Single-frame YOLO-World hits are noisy. A label must persist for at least
+# this many *consecutive* processed frames before it's treated as a real
+# hazard. At stride 1 / source 25 fps this is ~0.16 s of evidence — fast
+# enough to catch a falling brick, slow enough to discard flicker.
+_HAZARD_PERSISTENCE_FRAMES: int = 2
+
 _HAZARD_STRIDE:    int    = 1        # run hazard inference every N processed frames
 _ENABLE_HAZARD:    bool   = os.environ.get("PPE_DISABLE_HAZARD", "").lower() not in ("1", "true", "yes")
 
@@ -145,16 +178,49 @@ def _get_hazard_model() -> Optional[YOLO]:
         return None
 
 
+def _passes_class_filters(label: str, conf: float, bbox: List[float]) -> bool:
+    """
+    Apply per-class confidence floor and shape constraints to a YOLO-World
+    detection. Returns True if the detection should be kept.
+
+    The "fallen person" prompt is gated extra hard:
+      - much higher conf threshold than other hazard classes
+      - bbox aspect ratio (w/h) must indicate a horizontal pose
+    """
+    floor = _HAZARD_CONF.get(label, _HAZARD_CONF_DEFAULT)
+    if conf < floor:
+        return False
+
+    if label == "fallen person":
+        x1, y1, x2, y2 = bbox
+        w = max(1.0, x2 - x1)
+        h = max(1.0, y2 - y1)
+        if (w / h) < _FALLEN_PERSON_MIN_AR:
+            # Tall bbox → standing / bending / crouching worker, not fallen.
+            return False
+
+    return True
+
+
 def _infer_hazards(frame) -> List[Dict[str, Any]]:
     """
-    Run YOLO-World on one frame, returning hazard detections above
-    _HAZARD_CONF. Returns [] if the hazard model is disabled or unavailable.
+    Run YOLO-World on one frame, returning hazard detections that pass the
+    per-class filters. Returns [] if the hazard model is disabled or
+    unavailable.
+
+    NOTE: detections returned here are *candidates*; temporal persistence
+    (consecutive-frame streak) is enforced at the call site.
     """
     model = _get_hazard_model()
     if model is None:
         return []
+
+    # Use the lowest per-class floor as the model-side gate so we don't
+    # discard borderline detections before our class-specific filter sees them.
+    inference_floor = min(_HAZARD_CONF.values()) if _HAZARD_CONF else _HAZARD_CONF_DEFAULT
+
     try:
-        results = model(frame, device=_DEVICE, conf=_HAZARD_CONF, verbose=False)
+        results = model(frame, device=_DEVICE, conf=inference_floor, verbose=False)
     except Exception as exc:
         logger.warning("Hazard inference error: %s", exc)
         return []
@@ -167,12 +233,13 @@ def _infer_hazards(frame) -> List[Dict[str, Any]]:
             try:
                 label = result.names[int(box.cls[0])]
                 conf  = float(box.conf[0])
-                if conf < _HAZARD_CONF:
+                bbox  = bbox_to_list(box.xyxy[0])
+                if not _passes_class_filters(label, conf, bbox):
                     continue
                 raw.append({
                     "label":      label,
                     "confidence": round(conf, 4),
-                    "bbox":       bbox_to_list(box.xyxy[0]),
+                    "bbox":       bbox,
                 })
             except Exception as exc:
                 logger.warning("Skipping malformed hazard box: %s", exc)
@@ -224,6 +291,52 @@ def _filter(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         det["label"] = norm_label
         out.append(det)
     return out
+
+
+def _confirm_hazards(
+    candidates: List[Dict[str, Any]],
+    streak: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """
+    Apply consecutive-frame persistence to candidate hazards.
+
+    A hazard label only counts as confirmed once it's been seen in
+    ``_HAZARD_PERSISTENCE_FRAMES`` consecutive processed frames. Labels
+    that disappear reset their streak immediately.
+
+    The ``streak`` dict is mutated in place: the caller owns it so that
+    persistence carries across the loop without globals.
+
+    Parameters
+    ----------
+    candidates : raw hazard detections from this frame (already class-filtered)
+    streak     : {label: consecutive_frames_seen}, mutated in place
+
+    Returns
+    -------
+    List of hazard detections whose label has reached the persistence
+    threshold. The detection picked per label is the highest-confidence one
+    from this frame, so banner / annotation reflect the strongest evidence.
+    """
+    seen_this_frame: Dict[str, Dict[str, Any]] = {}
+    for det in candidates:
+        label = det["label"]
+        prev  = seen_this_frame.get(label)
+        if prev is None or det["confidence"] > prev["confidence"]:
+            seen_this_frame[label] = det
+
+    # Bump streaks for labels seen, drop labels not seen this frame.
+    for label in list(streak.keys()):
+        if label not in seen_this_frame:
+            del streak[label]
+    for label in seen_this_frame:
+        streak[label] = streak.get(label, 0) + 1
+
+    confirmed: List[Dict[str, Any]] = []
+    for label, det in seen_this_frame.items():
+        if streak[label] >= _HAZARD_PERSISTENCE_FRAMES:
+            confirmed.append(det)
+    return confirmed
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +399,15 @@ def run_ppe_detection(
     # hazard result on skipped frames so banners don't flicker.
     last_hazards: List[Dict[str, Any]] = []
 
+    # Per-label consecutive-frame counter — a label must persist for
+    # _HAZARD_PERSISTENCE_FRAMES frames in a row before being treated as
+    # a real hazard. Suppresses single-frame false positives.
+    hazard_streak: Dict[str, int] = {}
+
+    # Sticky-PPE state: last processed-frame index at which each required
+    # PPE item was seen on any visible worker. -1 means "never seen yet".
+    ppe_last_seen: Dict[str, int] = {"helmet": -1, "vest": -1}
+
     try:
         while True:
             ret, frame = cap.read()
@@ -305,9 +427,13 @@ def run_ppe_detection(
             dets      = _filter(raw_dets)
 
             # ---- open-vocab hazard inference (debris, falling rock, …) ----
+            # Inference yields *candidates*; persistence enforces that a
+            # hazard be seen in _HAZARD_PERSISTENCE_FRAMES consecutive frames
+            # before being acted on. Cached candidates are reused on
+            # stride-skipped frames so the streak logic still advances.
             if proc_idx % _HAZARD_STRIDE == 0:
                 last_hazards = _infer_hazards(small)
-            hazards = last_hazards
+            hazards = _confirm_hazards(last_hazards, hazard_streak)
 
             # ---- motion + recency context ----
             motion = compute_motion_score(prev_gray, gray)
@@ -322,6 +448,34 @@ def run_ppe_detection(
                 motion_score         = motion,
                 person_recently_seen = person_recently_seen,
             )
+
+            # ---- sticky-PPE smoothing ----
+            # Update last-seen frame for every required PPE item visible now.
+            for label in ("helmet", "vest"):
+                if any(d["label"] == label for d in dets):
+                    ppe_last_seen[label] = proc_idx
+
+            ppe_smoothed = False
+            if (
+                _PPE_STICKY_FRAMES > 0
+                and status == STATUS_UNSAFE
+                and missing
+                and any(d["label"] == "human" for d in dets)
+            ):
+                # Drop "missing" items that were seen on a worker in the
+                # very recent past — most likely the model lost the box for
+                # a frame or two while the worker bent / turned away.
+                kept_missing: List[str] = []
+                for item in missing:
+                    last = ppe_last_seen.get(item, -1)
+                    if last >= 0 and (proc_idx - last) <= _PPE_STICKY_FRAMES:
+                        ppe_smoothed = True
+                        continue
+                    kept_missing.append(item)
+                missing = sorted(kept_missing)
+                if not missing:
+                    status = STATUS_SAFE
+                    reason = None
 
             # ---- hazard override: forces UNSAFE if any hazard present ----
             status, missing, reason, hazard_labels = apply_hazard_override(
@@ -345,6 +499,7 @@ def run_ppe_detection(
                 "detections":    dets,
                 "hazards":       hazard_labels,
                 "hazard_boxes":  hazards,
+                "ppe_smoothed":  ppe_smoothed,
             })
 
             # ---- optional annotation ----
