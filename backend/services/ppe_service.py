@@ -25,7 +25,11 @@ import torch
 from ultralytics import YOLO
 
 from utils.ppe_utils import (
+    STATUS_SAFE,
+    STATUS_UNKNOWN,
+    STATUS_UNSAFE,
     bbox_to_list,
+    compute_motion_score,
     compute_summary,
     draw_detections,
     evaluate_frame_safety,
@@ -55,6 +59,11 @@ _FRAME_STRIDE  = 2          # process every Nth frame (skip the rest)
 _INFER_W       = 640        # resize width  before inference
 _INFER_H       = 480        # resize height before inference
 _SAVE_VIDEO    = True       # write annotated output video?
+
+# Occlusion handling — once a person has been seen, treat the next
+# _OCCLUSION_GRACE_FRAMES processed frames without a person as UNKNOWN
+# (not SAFE). At stride 2 / 25 fps source ≈ 25 frames ≈ 2 s of grace.
+_OCCLUSION_GRACE_FRAMES = 25
 
 # Use GPU 0 if available, else CPU
 _DEVICE = 0 if torch.cuda.is_available() else "cpu"
@@ -179,6 +188,11 @@ def run_ppe_detection(
     raw_idx  = 0    # all frames read counter
     proc_idx = 0    # processed-frame counter
 
+    # Occlusion-tracking state
+    prev_gray: Optional[Any] = None
+    ever_seen_person          = False
+    frames_since_person_seen  = 10**9   # "never seen yet"
+
     try:
         while True:
             ret, frame = cap.read()
@@ -191,27 +205,50 @@ def run_ppe_detection(
 
             # ---- resize ----
             small = cv2.resize(frame, (_INFER_W, _INFER_H))
+            gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
             # ---- infer + filter ----
             raw_dets  = _infer_frame(model, small)
             dets      = _filter(raw_dets)
 
-            # ---- safety evaluation ----
-            is_safe, missing = evaluate_frame_safety(dets)
+            # ---- motion + recency context ----
+            motion = compute_motion_score(prev_gray, gray)
+            person_recently_seen = (
+                ever_seen_person
+                and frames_since_person_seen <= _OCCLUSION_GRACE_FRAMES
+            )
+
+            # ---- tri-state safety evaluation ----
+            status, missing, reason = evaluate_frame_safety(
+                dets,
+                motion_score         = motion,
+                person_recently_seen = person_recently_seen,
+            )
+
+            # ---- update rolling person-seen state ----
+            if any(d["label"] == "human" for d in dets):
+                ever_seen_person         = True
+                frames_since_person_seen = 0
+            else:
+                frames_since_person_seen += 1
 
             frame_results.append({
                 "frame_id":   proc_idx,
-                "safe":       is_safe,
+                "status":     status,
+                "safe":       status == STATUS_SAFE,   # legacy field
                 "missing":    missing,
+                "reason":     reason,
+                "motion":     round(motion, 4),
                 "detections": dets,
             })
 
             # ---- optional annotation ----
             if writer is not None:
-                annotated = draw_detections(small, dets, is_safe, missing)
+                annotated = draw_detections(small, dets, status, missing, reason)
                 writer.write(annotated)
 
-            proc_idx += 1
+            prev_gray  = gray
+            proc_idx  += 1
 
     finally:
         cap.release()
@@ -222,8 +259,11 @@ def run_ppe_detection(
 
     summary = compute_summary(frame_results)
     logger.info(
-        "PPE done — %d frames | compliance %.1f%% | violations: %d",
+        "PPE done — %d frames | safe %d | unsafe %d | unknown %d | compliance %.1f%% | violations: %d",
         summary["total_frames"],
+        summary["safe_frames"],
+        summary["unsafe_frames"],
+        summary["unknown_frames"],
         summary["compliance_score"],
         len(summary["violations"]),
     )
