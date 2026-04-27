@@ -513,6 +513,24 @@ _POSE_RECS: Dict[str, str] = {
     "default": "Maintain proper lifting posture: straight back, bent knees, load close to body.",
 }
 
+# Accident-event recommendations (per event type). CRITICAL events get a
+# louder phrasing; WARN events suggest investigation rather than evacuation.
+_ACCIDENT_RECS: Dict[str, str] = {
+    "FALL":             "Worker fall detected -- dispatch first aid immediately and check the worker's condition.",
+    "MOTIONLESS_DOWN":  "Worker is down and not moving -- treat as medical emergency; call emergency services.",
+    "CRUSHED":          "Worker may be trapped or covered -- send personnel to the location and clear obstructions.",
+    "STRUCK":           "Possible impact event -- review the area for falling objects and check on the worker.",
+    "STUMBLE":          "Stumble detected -- inspect the floor for trip hazards (cables, spills, debris).",
+}
+
+_ACCIDENT_LABELS: Dict[str, str] = {
+    "FALL":             "Worker fall",
+    "MOTIONLESS_DOWN":  "Worker down / not moving",
+    "CRUSHED":          "Worker trapped / obscured",
+    "STRUCK":           "Possible impact",
+    "STUMBLE":          "Stumble",
+}
+
 
 def _ppe_msg(missing: List[str]) -> str:
     if not missing:
@@ -558,6 +576,37 @@ def _pose_recs(pose_violations: List[Dict]) -> List[str]:
     return recs
 
 
+def _accident_recs(accident_events: List[Dict]) -> List[str]:
+    """One recommendation per distinct accident event type seen."""
+    seen, recs = set(), []
+    # Render in a stable priority order so the most urgent rec comes first.
+    priority = ("MOTIONLESS_DOWN", "CRUSHED", "FALL", "STRUCK", "STUMBLE")
+    types_present = {e.get("type") for e in accident_events if e.get("type")}
+    for t in priority:
+        if t in types_present and t not in seen:
+            seen.add(t)
+            recs.append(_ACCIDENT_RECS.get(t, "Investigate the accident event."))
+    return recs
+
+
+def _accident_msg(accident_events: List[Dict]) -> str:
+    """Short human-readable summary phrase for the worst active event."""
+    if not accident_events:
+        return ""
+    priority = ("MOTIONLESS_DOWN", "CRUSHED", "FALL", "STRUCK", "STUMBLE")
+    by_type: Dict[str, Dict] = {}
+    for e in accident_events:
+        t = e.get("type")
+        if t and t not in by_type:
+            by_type[t] = e
+    for t in priority:
+        ev = by_type.get(t)
+        if ev:
+            label = _ACCIDENT_LABELS.get(t, t)
+            return f"{label} detected at frame {ev.get('frame', '?')} (Worker #{ev.get('track_id', '?')})"
+    return "Accident event detected"
+
+
 # ---------------------------------------------------------------------------
 # Status derivation
 # ---------------------------------------------------------------------------
@@ -573,30 +622,60 @@ def _pose_status(r: Dict) -> str:
     return "UNSAFE"
 
 
-def _final_status(ppe_st: str, pose_st: str) -> str:
-    if ppe_st == "UNSAFE" and pose_st == "UNSAFE": return "HIGH RISK"
-    if ppe_st == "UNSAFE" or pose_st == "UNSAFE":  return "UNSAFE"
-    if pose_st == "MODERATE":                       return "MODERATE"
+def _final_status(ppe_st: str, pose_st: str, accident_st: str = "SAFE") -> str:
+    """
+    Internal status reducer (no fire signal). Used by merge_results when
+    only PPE + Pose are being merged.
+
+    Priority (highest -> lowest):
+        CRITICAL   - accident_st is CRITICAL (worker fall / trapped / etc.)
+        HIGH RISK  - both PPE and Pose are UNSAFE
+        UNSAFE     - PPE or Pose is UNSAFE, or accident_st is WARN
+        MODERATE   - Pose is MODERATE only
+        SAFE       - all clear
+    """
+    if accident_st == "CRITICAL":
+        return "CRITICAL"
+    if ppe_st == "UNSAFE" and pose_st == "UNSAFE":
+        return "HIGH RISK"
+    if ppe_st == "UNSAFE" or pose_st == "UNSAFE" or accident_st == "WARN":
+        return "UNSAFE"
+    if pose_st == "MODERATE":
+        return "MODERATE"
     return "SAFE"
 
 
-def get_final_status(ppe_status: str, pose_status: str, fire_status: str) -> str:
+def get_final_status(
+    ppe_status:      str,
+    pose_status:     str,
+    fire_status:     str,
+    accident_status: str = "SAFE",
+) -> str:
     """
     Unified Decision Engine — derives the single worst-case status
-    across all three modules.
+    across all four modules.
 
-    Priority (highest → lowest):
-        CRITICAL  — fire is UNSAFE (immediate evacuation)
-        HIGH RISK — both PPE and Pose are UNSAFE
-        UNSAFE    — either PPE or Pose is UNSAFE
-        MODERATE  — PPE is SAFE but Pose is MODERATE
-        SAFE      — all modules report SAFE
+    Priority (highest -> lowest):
+        CRITICAL   - fire is UNSAFE OR accident is CRITICAL
+                     (immediate evacuation OR worker emergency)
+        HIGH RISK  - both PPE and Pose are UNSAFE
+        UNSAFE     - PPE or Pose is UNSAFE, or accident is WARN
+                     (impact / stumble that didn't fully fall)
+        MODERATE   - Pose is MODERATE only
+        SAFE       - all modules report SAFE
+
+    Backward compatible: callers that don't pass ``accident_status`` get
+    the original 3-module behavior.
     """
-    if fire_status == "UNSAFE":
+    if fire_status == "UNSAFE" or accident_status == "CRITICAL":
         return "CRITICAL"
     if ppe_status == "UNSAFE" and pose_status == "UNSAFE":
         return "HIGH RISK"
-    if ppe_status == "UNSAFE" or pose_status == "UNSAFE":
+    if (
+        ppe_status  == "UNSAFE"
+        or pose_status == "UNSAFE"
+        or accident_status == "WARN"
+    ):
         return "UNSAFE"
     if ppe_status == "MODERATE" or pose_status == "MODERATE":
         return "MODERATE"
@@ -608,9 +687,11 @@ def get_final_status(ppe_status: str, pose_status: str, fire_status: str) -> str
 # ---------------------------------------------------------------------------
 
 def merge_results(ppe_result: Dict, pose_result: Dict) -> Dict:
-    ppe_st  = _ppe_status(ppe_result)
-    pose_st = _pose_status(pose_result)
-    final   = _final_status(ppe_st, pose_st)
+    ppe_st         = _ppe_status(ppe_result)
+    pose_st        = _pose_status(pose_result)
+    accident_st    = pose_result.get("accident_status", "SAFE")
+    accident_evts  = pose_result.get("accident_events", [])
+    final          = _final_status(ppe_st, pose_st, accident_st)
 
     ppe_v  = ppe_result.get("violations",  [])
     pose_v = pose_result.get("violations", [])
@@ -632,37 +713,60 @@ def merge_results(ppe_result: Dict, pose_result: Dict) -> Dict:
             "reason":   _pose_msg(reason),
             "severity": "high" if pose_st == "UNSAFE" else "medium",
         })
+    # Accident events outrank everything else — they describe a worker who
+    # is currently in danger right now, not an ergonomic risk.
+    for e in accident_evts:
+        ev_type = e.get("type", "ACCIDENT")
+        violations.append({
+            "frame":    e.get("frame", "?"),
+            "type":     "ACCIDENT",
+            "subtype":  ev_type,
+            "reason":   f"{_ACCIDENT_LABELS.get(ev_type, ev_type)} (Worker #{e.get('track_id', '?')})",
+            "severity": "critical" if e.get("severity") == "CRITICAL" else "high",
+        })
 
-    all_missing = list({item for v in ppe_v for item in (v.get("missing") or [])})
-    recommendations = _ppe_recs(all_missing) + _pose_recs(pose_v)
+    all_missing     = list({item for v in ppe_v for item in (v.get("missing") or [])})
+    recommendations = (
+        _accident_recs(accident_evts)   # urgent accident recs first
+        + _ppe_recs(all_missing)
+        + _pose_recs(pose_v)
+    )
     if not recommendations:
-        recommendations = ["No critical recommendations — continue monitoring."]
+        recommendations = ["No critical recommendations -- continue monitoring."]
 
+    # Build the summary message. Accident messages take precedence over
+    # PPE / pose phrasing because they're the most urgent thing to surface.
     ppe_issues  = list({item for v in ppe_v for item in (v.get("missing") or [])})
     pose_issues = list({(v.get("reason") or v.get("issue") or "bad posture") for v in pose_v})
-    parts = (
-        ([_ppe_msg(ppe_issues)]  if ppe_issues  else []) +
-        ([_pose_msg(pose_issues[0])] if pose_issues else [])
-    )
-    message = (
-        " and ".join(parts) + "." if parts
-        else "No safety violations detected — workspace appears compliant."
-    )
+
+    if accident_evts:
+        message = _accident_msg(accident_evts) + "."
+    else:
+        parts = (
+            ([_ppe_msg(ppe_issues)]      if ppe_issues  else [])
+            + ([_pose_msg(pose_issues[0])] if pose_issues else [])
+        )
+        message = (
+            " and ".join(parts) + "." if parts
+            else "No safety violations detected -- workspace appears compliant."
+        )
 
     return {
-        "mode":            "combined",
-        "final_status":    final,
-        "ppe_status":      ppe_st,
-        "pose_status":     pose_st,
-        "ppe_score":       ppe_result.get("compliance_score", 0.0),
-        "pose_score":      pose_result.get("safety_score",    0.0),
-        "total_frames":    max(
+        "mode":             "combined",
+        "final_status":     final,
+        "ppe_status":       ppe_st,
+        "pose_status":      pose_st,
+        "accident_status":  accident_st,
+        "accident_events":  accident_evts,
+        "ppe_score":        ppe_result.get("compliance_score", 0.0),
+        "pose_score":       pose_result.get("safety_score",    0.0),
+        "total_frames":     max(
             ppe_result.get("total_frames",  0),
             pose_result.get("total_frames", 0),
         ),
-        "violations":      violations,
-        "summary_message": message,
-        "recommendations": recommendations,
+        "violations":       violations,
+        "summary_message":  message,
+        "recommendations":  recommendations,
     }
 
 

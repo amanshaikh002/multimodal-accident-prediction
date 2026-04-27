@@ -251,30 +251,36 @@ async def detect(
                 output_video_path = _FIRE_OUT,     # annotated fire video as primary output
             )
             # Derive module statuses
-            ppe_status  = "SAFE" if (ppe_result.get("compliance_score", 0) >= 70) else "UNSAFE"
-            pose_st_raw = pose_result.get("safety_score", 0)
-            pose_status = "SAFE" if pose_st_raw >= 80 else ("MODERATE" if pose_st_raw >= 50 else "UNSAFE")
-            fire_status = fire_result.get("status", "SAFE")
+            ppe_status      = "SAFE" if (ppe_result.get("compliance_score", 0) >= 70) else "UNSAFE"
+            pose_st_raw     = pose_result.get("safety_score", 0)
+            pose_status     = "SAFE" if pose_st_raw >= 80 else ("MODERATE" if pose_st_raw >= 50 else "UNSAFE")
+            fire_status     = fire_result.get("status", "SAFE")
+            accident_status = pose_result.get("accident_status", "SAFE")
+            accident_events = pose_result.get("accident_events", [])
 
-            final_status = get_final_status(ppe_status, pose_status, fire_status)
+            final_status = get_final_status(
+                ppe_status, pose_status, fire_status, accident_status,
+            )
 
             result = {
-                "mode":          "all",
-                "final_status":  final_status,
-                "ppe_status":    ppe_status,
-                "pose_status":   pose_status,
-                "fire_status":   fire_status,
-                "ppe_score":     ppe_result.get("compliance_score", 0.0),
-                "pose_score":    pose_result.get("safety_score",    0.0),
-                "fire_ratio":    fire_result.get("fire_ratio",      0.0),
-                "fire_frames":   fire_result.get("fire_frames",     0),
-                "total_frames":  max(
+                "mode":             "all",
+                "final_status":     final_status,
+                "ppe_status":       ppe_status,
+                "pose_status":      pose_status,
+                "fire_status":      fire_status,
+                "accident_status":  accident_status,
+                "accident_events":  accident_events,
+                "ppe_score":        ppe_result.get("compliance_score", 0.0),
+                "pose_score":       pose_result.get("safety_score",    0.0),
+                "fire_ratio":       fire_result.get("fire_ratio",      0.0),
+                "fire_frames":      fire_result.get("fire_frames",     0),
+                "total_frames":     max(
                     ppe_result.get("total_frames",  0),
                     pose_result.get("total_frames", 0),
                     fire_result.get("total_frames", 0),
                 ),
-                "violations":    ppe_result.get("violations", []) + pose_result.get("violations", []),
-                "output_video":  "fire_annotated.mp4",
+                "violations":       ppe_result.get("violations", []) + pose_result.get("violations", []),
+                "output_video":     "fire_annotated.mp4",
             }
 
         elif mode == "sound":

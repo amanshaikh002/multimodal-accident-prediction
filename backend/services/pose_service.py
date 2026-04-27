@@ -56,7 +56,13 @@ from utils.pose_utils import (          # backend/utils/pose_utils.py
     make_empty_buffers,
     select_primary_person,
 )
-from utils.video_utils import finalize_video, get_video_writer, open_video   # backend/utils/video_utils.py
+from utils.pose_tracker     import PoseTracker
+from utils.accident_detector import (
+    AccidentDetector,
+    AccidentOverlayRenderer,
+    overall_status as _accident_overall_status,
+)
+from utils.video_utils      import finalize_video, get_video_writer, open_video   # backend/utils/video_utils.py
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +246,13 @@ def process_pose_video(
 
     violations: List[Dict[str, Any]] = []
 
+    # --- Per-person tracker + accident detector (parallel signal) -----
+    tracker          = PoseTracker(iou_thresh=0.30, max_age_frames=15, history_len=60)
+    accident_det     = AccidentDetector(frame_w=_INFER_W, frame_h=_INFER_H)
+    overlay_renderer = AccidentOverlayRenderer(ttl_frames=45)   # ~3 s of persistence
+    accident_events: List[Dict[str, Any]] = []
+    active_tracks_last_frame: List[Any] = []  # remembered for no-pose overlay drawing
+
     try:
         while True:
             ret, frame = cap.read()
@@ -266,7 +279,8 @@ def process_pose_video(
                 )
             except Exception as exc:
                 logger.warning("YOLO inference error on frame %d: %s", raw_idx, exc)
-                _write_no_pose(frame, writer, "Inference error")
+                _write_no_pose(frame, writer, "Inference error",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             result = results[0]
@@ -278,7 +292,8 @@ def process_pose_video(
             )
 
             if no_pose:
-                _write_no_pose(frame, writer, "No person detected")
+                _write_no_pose(frame, writer, "No person detected",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             # --- Extract keypoints ---
@@ -286,10 +301,37 @@ def process_pose_video(
             kps_xy_all   = result.keypoints.xy.cpu().numpy()      # (N, 17, 2)
             kps_conf_all = result.keypoints.conf.cpu().numpy()    # (N, 17)
 
+            # --- Per-person tracker + accident detection ----------------
+            # Run on EVERY detected person (not just the ergonomic
+            # "primary person") so we don't miss a worker getting struck
+            # while a different one is being analysed for posture.
+            try:
+                active_tracks = tracker.update(
+                    proc_frames, boxes, kps_xy_all, kps_conf_all,
+                )
+                active_tracks_last_frame = active_tracks
+                for trk in active_tracks:
+                    ev = accident_det.evaluate(trk, proc_frames)
+                    if ev is not None:
+                        accident_events.append(ev.to_dict())
+                        overlay_renderer.push(ev)
+                        logger.warning(
+                            "[POSE] Accident event: track=%d frame=%d type=%s "
+                            "severity=%s conf=%.2f reason=%s",
+                            ev.track_id, ev.frame, ev.type, ev.severity,
+                            ev.confidence, ev.reason,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[POSE] Accident detector error on frame %d: %s",
+                    proc_frames, exc,
+                )
+
             # --- Select primary person ---
             person_idx = select_primary_person(boxes, _INFER_W, _INFER_H)
             if person_idx is None:
-                _write_no_pose(frame, writer, "No primary person")
+                _write_no_pose(frame, writer, "No primary person",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             kps_xy    = kps_xy_all[person_idx]
@@ -298,7 +340,8 @@ def process_pose_video(
 
             # --- Validate pose keypoint quality ---
             if not is_pose_valid(kps_conf):
-                _write_no_pose(frame, writer, "Low keypoint confidence")
+                _write_no_pose(frame, writer, "Low keypoint confidence",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             pose_detected = True  # At least one valid pose found
@@ -311,13 +354,15 @@ def process_pose_video(
             features = extract_all_features(kps_xy, kps_conf, buffers)
 
             if features is None:
-                _write_no_pose(frame, writer, "Feature extraction failed")
+                _write_no_pose(frame, writer, "Feature extraction failed",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             # --- Hybrid classify (rule-first, ML as hint only) ---
             x_vec = build_feature_vector(features)
             if np.isnan(x_vec).any():
-                _write_no_pose(frame, writer, "NaN in features")
+                _write_no_pose(frame, writer, "NaN in features",
+                               overlay_renderer, raw_idx, active_tracks_last_frame)
                 continue
 
             raw_pred, confidence, decision_src = hybrid_classify(features, clf, x_vec)
@@ -352,6 +397,8 @@ def process_pose_video(
             # --- Annotate frame (if writing video) ---
             if writer is not None:
                 _draw_hud_overlay(frame, features, label, confidence, person_box, color_bgr)
+                # Accident overlay last so it sits on top of the ergonomic HUD.
+                overlay_renderer.draw(frame, raw_idx, active_tracks_last_frame)
                 writer.write(frame)
 
     finally:
@@ -371,17 +418,31 @@ def process_pose_video(
     total_frames = safe_frames + unsafe_frames
     safety_score = round((safe_frames / total_frames) * 100, 1) if total_frames > 0 else 0.0
 
+    # --- Accident summary (parallel signal) ---------------------------
+    # Collapse the per-frame events into one overall status. CRITICAL beats
+    # WARN beats SAFE.
+    if accident_events:
+        sev_rank = {"CRITICAL": 2, "WARN": 1, "SAFE": 0}
+        worst = max((e["severity"] for e in accident_events), key=lambda s: sev_rank.get(s, 0))
+        accident_status = "CRITICAL" if worst == "CRITICAL" else ("WARN" if worst == "WARN" else "SAFE")
+    else:
+        accident_status = "SAFE"
+
     summary = {
-        "total_frames":  total_frames,
-        "safe_frames":   safe_frames,
-        "unsafe_frames": unsafe_frames,
-        "safety_score":  safety_score,
-        "violations":    violations,
+        "total_frames":     total_frames,
+        "safe_frames":      safe_frames,
+        "unsafe_frames":    unsafe_frames,
+        "safety_score":     safety_score,
+        "violations":       violations,
+        "accident_status":  accident_status,
+        "accident_events":  accident_events,
     }
 
     logger.info(
-        "Pose done — %d frames | safety %.1f%% | violations: %d",
+        "Pose done -- %d frames | safety %.1f%% | violations: %d | "
+        "accident_status=%s (events=%d)",
         total_frames, safety_score, len(violations),
+        accident_status, len(accident_events),
     )
 
     return summary
@@ -395,11 +456,22 @@ def _write_no_pose(
     frame: np.ndarray,
     writer: Optional[cv2.VideoWriter],
     msg: str,
+    overlay_renderer: Optional["AccidentOverlayRenderer"] = None,
+    frame_idx: int = 0,
+    tracks: Optional[List[Any]] = None,
 ) -> None:
-    """Stamp a status message on the frame and write it to the output video."""
+    """
+    Stamp a status message on the frame and write it to the output video.
+
+    If an overlay renderer is supplied, active accident overlays are drawn
+    on top so a fall warning persists even through frames where pose
+    detection momentarily failed.
+    """
     cv2.putText(
         frame, msg, (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2, cv2.LINE_AA,
     )
     if writer is not None:
+        if overlay_renderer is not None and overlay_renderer.has_active_events():
+            overlay_renderer.draw(frame, frame_idx, tracks)
         writer.write(frame)
