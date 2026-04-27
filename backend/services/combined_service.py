@@ -316,6 +316,21 @@ def _render_combined_video(
 
     raw_idx = 0
 
+    # ── Sticky-PPE state ──────────────────────────────────────────────────
+    # The trained PPE YOLO has poor recall on bent / non-frontal poses, on
+    # blue helmets vs. yellow, and on dark uniforms vs. classic high-vis
+    # vests. Without smoothing, a single bad-detection frame flips the
+    # per-person box to UNSAFE even when the worker is clearly compliant
+    # for 95% of the video. We track the most recent processed frame at
+    # which each required PPE item was visible ANYWHERE in the scene; if
+    # the item was seen within the last _PPE_STICKY_FRAMES frames, we
+    # treat visible workers as still wearing it. Slightly leaky for
+    # multi-worker scenes (one worker's helmet can mask another worker's
+    # genuine missing helmet) but a much better default than constant
+    # false UNSAFE flickers. ~1.5 s of grace at stride 2 / 25 fps.
+    _PPE_STICKY_FRAMES = 18
+    ppe_last_seen: Dict[str, int] = {"helmet": -1, "vest": -1}
+
     try:
         while True:
             ret, frame = cap.read()
@@ -376,6 +391,22 @@ def _render_combined_video(
             ppe_helmet_boxes = [d["bbox"] for d in ppe_dets if d["label"] == "helmet"]
             ppe_vest_boxes   = [d["bbox"] for d in ppe_dets if d["label"] == "vest"]
 
+            # ── Update sticky-PPE last-seen state ────────────────────────────
+            # If ANY helmet/vest was detected anywhere this frame, refresh the
+            # sticky timer for that item.
+            if ppe_helmet_boxes:
+                ppe_last_seen["helmet"] = raw_idx
+            if ppe_vest_boxes:
+                ppe_last_seen["vest"]   = raw_idx
+            helmet_recently_seen = (
+                ppe_last_seen["helmet"] >= 0
+                and (raw_idx - ppe_last_seen["helmet"]) <= _PPE_STICKY_FRAMES
+            )
+            vest_recently_seen = (
+                ppe_last_seen["vest"] >= 0
+                and (raw_idx - ppe_last_seen["vest"]) <= _PPE_STICKY_FRAMES
+            )
+
             # ── STEP 3: Per-person processing ────────────────────────────────
             worst_status  = "SAFE"
             worst_pose    = "SAFE"
@@ -420,9 +451,25 @@ def _render_combined_video(
                         for vb in ppe_vest_boxes
                     )
 
+                    # Sticky-PPE smoothing: if the model momentarily lost the
+                    # box on THIS person but the same item was seen anywhere
+                    # else within the recent window, assume it is still worn.
+                    # Stops single-frame detection misses from flipping to
+                    # UNSAFE annotations on a video that's mostly compliant.
+                    helmet_smoothed = False
+                    vest_smoothed   = False
+                    if not helmet_ok and helmet_recently_seen:
+                        helmet_ok       = True
+                        helmet_smoothed = True
+                    if not vest_ok and vest_recently_seen:
+                        vest_ok       = True
+                        vest_smoothed = True
+
                     logger.debug(
-                        "[COMBINED] person %d: pose=%s  helmet=%s  vest=%s",
-                        pid, pose_label, helmet_ok, vest_ok,
+                        "[COMBINED] person %d: pose=%s  helmet=%s%s  vest=%s%s",
+                        pid, pose_label,
+                        helmet_ok, " (smoothed)" if helmet_smoothed else "",
+                        vest_ok,   " (smoothed)" if vest_smoothed   else "",
                     )
 
                     person_missing = []
@@ -603,7 +650,7 @@ def _accident_msg(accident_events: List[Dict]) -> str:
         ev = by_type.get(t)
         if ev:
             label = _ACCIDENT_LABELS.get(t, t)
-            return f"{label} detected at frame {ev.get('frame', '?')} (Worker #{ev.get('track_id', '?')})"
+            return f"{label} detected at frame {ev.get('frame', '?')}"
     return "Accident event detected"
 
 
@@ -734,7 +781,7 @@ def merge_results(ppe_result: Dict, pose_result: Dict) -> Dict:
             "frame":    e.get("frame", "?"),
             "type":     "ACCIDENT",
             "subtype":  ev_type,
-            "reason":   f"{_ACCIDENT_LABELS.get(ev_type, ev_type)} (Worker #{e.get('track_id', '?')})",
+            "reason":   _ACCIDENT_LABELS.get(ev_type, ev_type),
             "severity": "critical" if e.get("severity") == "CRITICAL" else "high",
         })
 

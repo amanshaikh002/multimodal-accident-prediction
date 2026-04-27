@@ -238,46 +238,58 @@ async def detect(
             )
 
         elif mode == "all":
-            # Full platform: PPE + Pose + Fire + Sound — run sequentially, merge results
-            logger.info("[ALL] Running full platform analysis (PPE + Pose + Fire + Sound)...")
-            ppe_result = run_ppe_detection(
-                video_path        = _TEMP_INPUT,
-                output_video_path = None,          # metrics only
-            )
-            pose_result = process_pose_video(
-                video_path        = _TEMP_INPUT,
-                output_video_path = None,          # metrics only
-            )
-            fire_result = process_fire_video(
-                video_path        = _TEMP_INPUT,
-                output_video_path = _FIRE_OUT,     # annotated fire video as primary output
-            )
-            try:
-                sound_result = process_sound_video(
-                    video_path        = _TEMP_INPUT,
-                    output_video_path = None,      # metrics only in 'all' mode
-                )
-            except Exception as exc:
-                # Don't let a failed audio extraction kill the whole report.
-                logger.warning("[ALL] Sound module failed (non-fatal): %s", exc)
-                sound_result = {
-                    "status": "SAFE", "anomaly_ratio": 0.0,
-                    "anomaly_windows": 0, "total_windows": 0,
-                    "events": [], "message": f"Sound analysis skipped: {exc}",
-                }
+            # Full platform: PPE + Pose + Fire (sound is its own dedicated mode).
+            # Pipeline:
+            #   1. Run PPE + Pose merged via combined_service -> combined_annotated.mp4
+            #      (skeleton + per-person box + accident overlays + global banner)
+            #   2. Run fire on the COMBINED OUTPUT to overlay fire boxes on top
+            #      (banner suppressed via draw_banner=False so we don't cover
+            #      the combined banner). Output -> all_annotated.mp4.
+            #   3. Use ppe_result + pose_result returned by the combined pass for
+            #      metric merging via merge_results.
+            logger.info("[ALL] Running full platform analysis (PPE + Pose + Fire)...")
 
-            # Derive module statuses
-            ppe_status      = "SAFE" if (ppe_result.get("compliance_score", 0) >= 70) else "UNSAFE"
-            pose_st_raw     = pose_result.get("safety_score", 0)
-            pose_status     = "SAFE" if pose_st_raw >= 80 else ("MODERATE" if pose_st_raw >= 50 else "UNSAFE")
-            fire_status     = fire_result.get("status",  "SAFE")
-            sound_status    = sound_result.get("status", "SAFE")
-            accident_status = pose_result.get("accident_status", "SAFE")
-            accident_events = pose_result.get("accident_events", [])
+            # ---- 1. Combined pass (PPE + Pose + Accident annotations) ----
+            combined = process_combined_video(
+                video_path        = _TEMP_INPUT,
+                ppe_output_path   = _COMBINED_OUT,
+                pose_output_path  = _COMBINED_OUT,
+            )
+
+            # ---- 2. Fire pass on the combined output (overlay-only) ------
+            try:
+                fire_result = process_fire_video(
+                    video_path        = _COMBINED_OUT,
+                    output_video_path = _ALL_OUT,
+                    draw_banner       = False,     # don't cover combined banner
+                )
+            except TypeError:
+                # Older fire_service without draw_banner kwarg -- fall back
+                # to a separate fire-annotated output.
+                fire_result = process_fire_video(
+                    video_path        = _TEMP_INPUT,
+                    output_video_path = _FIRE_OUT,
+                )
+
+            # Merged statuses
+            ppe_status      = combined.get("ppe_status",  "SAFE")
+            pose_status     = combined.get("pose_status", "SAFE")
+            fire_status     = fire_result.get("status",   "SAFE")
+            accident_status = combined.get("accident_status", "SAFE")
+            accident_events = combined.get("accident_events", [])
 
             final_status = get_final_status(
-                ppe_status, pose_status, fire_status, accident_status, sound_status,
+                ppe_status, pose_status, fire_status, accident_status,
             )
+
+            # Pick the unified output: prefer all_annotated.mp4, fall back
+            # to combined or fire if either pass failed to write.
+            if os.path.isfile(_ALL_OUT):
+                primary_video = "all_annotated.mp4"
+            elif os.path.isfile(_COMBINED_OUT):
+                primary_video = "combined_annotated.mp4"
+            else:
+                primary_video = "fire_annotated.mp4"
 
             result = {
                 "mode":             "all",
@@ -285,24 +297,21 @@ async def detect(
                 "ppe_status":       ppe_status,
                 "pose_status":      pose_status,
                 "fire_status":      fire_status,
-                "sound_status":     sound_status,
                 "accident_status":  accident_status,
                 "accident_events":  accident_events,
-                "ppe_score":        ppe_result.get("compliance_score", 0.0),
-                "pose_score":       pose_result.get("safety_score",    0.0),
-                "fire_ratio":       fire_result.get("fire_ratio",      0.0),
-                "fire_frames":      fire_result.get("fire_frames",     0),
-                "anomaly_ratio":    sound_result.get("anomaly_ratio",  0.0),
-                "anomaly_windows":  sound_result.get("anomaly_windows", 0),
-                "sound_events":     sound_result.get("events",         []),
-                "sound_message":    sound_result.get("message",        ""),
+                "ppe_score":        combined.get("ppe_score",  0.0),
+                "pose_score":       combined.get("pose_score", 0.0),
+                "fire_ratio":       fire_result.get("fire_ratio",  0.0),
+                "fire_frames":      fire_result.get("fire_frames", 0),
+                "fire_detected":    fire_result.get("fire_detected", False),
                 "total_frames":     max(
-                    ppe_result.get("total_frames",  0),
-                    pose_result.get("total_frames", 0),
+                    combined.get("total_frames", 0),
                     fire_result.get("total_frames", 0),
                 ),
-                "violations":       ppe_result.get("violations", []) + pose_result.get("violations", []),
-                "output_video":     "fire_annotated.mp4",
+                "violations":       combined.get("violations", []),
+                "summary_message":  combined.get("summary_message", ""),
+                "recommendations":  combined.get("recommendations", []),
+                "output_video":     primary_video,
             }
 
         elif mode == "sound":
@@ -375,11 +384,11 @@ async def list_modes():
     """
     return {
         "modes": [
-            {"id": "ppe",      "label": "PPE Compliance Detection",                "status": "active"},
-            {"id": "pose",     "label": "Pose Safety Detection",                    "status": "active"},
-            {"id": "fire",     "label": "Fire Hazard Detection",                    "status": "active"},
-            {"id": "sound",    "label": "Anomaly Sound Detection",                  "status": "active"},
-            {"id": "combined", "label": "PPE + Pose Detection",                     "status": "active"},
-            {"id": "all",      "label": "Full Platform (PPE + Pose + Fire + Sound)", "status": "active"},
+            {"id": "ppe",      "label": "PPE Compliance Detection",         "status": "active"},
+            {"id": "pose",     "label": "Pose Safety Detection",            "status": "active"},
+            {"id": "fire",     "label": "Fire Hazard Detection",            "status": "active"},
+            {"id": "sound",    "label": "Anomaly Sound Detection",          "status": "active"},
+            {"id": "combined", "label": "PPE + Pose Detection",             "status": "active"},
+            {"id": "all",      "label": "Full Platform (PPE + Pose + Fire)", "status": "active"},
         ]
     }

@@ -77,10 +77,19 @@ STRUCK_BASELINE_FRAMES = 30   # ~2 s rolling baseline
 STRUCK_MIN_VEL_NORM    = 0.02   # absolute floor — below this we don't fire
 
 # CRUSHED: avg keypoint conf collapse from "well-tracked" to "lost".
-CRUSHED_CONF_GOOD     = 0.55
-CRUSHED_CONF_LOST     = 0.25
-CRUSHED_GOOD_FRAMES   = 8     # required pre-collapse "good" frames
-CRUSHED_LOST_FRAMES   = 6     # required sustained "lost" frames
+# A real "trapped/crushed" event has the worker partially visible at very
+# low confidence for several SECONDS, not just half a second. The previous
+# 6-frame (~0.4 s) lost window false-fired on workers walking behind boxes
+# / partial occlusions in real warehouse footage. Bumped to ~2 s of
+# sustained low conf with a longer "good" baseline before that.
+CRUSHED_CONF_GOOD     = 0.60   # avg conf in the pre-collapse window
+CRUSHED_CONF_LOST     = 0.20   # avg conf in the sustained-lost window
+CRUSHED_GOOD_FRAMES   = 15     # ~1 s of confident tracking baseline
+CRUSHED_LOST_FRAMES   = 30     # ~2 s of sustained partial-visibility loss
+# Plus: the bbox area must shrink meaningfully -- a person walking behind
+# an occluder keeps roughly the same bbox; a trapped person typically has
+# only a partial body visible, so the bbox area drops.
+CRUSHED_BBOX_SHRINK_RATIO = 0.65   # avg lost-bbox area must be <= 65% of avg good-bbox area
 
 # MOTIONLESS_DOWN: post-fall stillness window.
 MOTIONLESS_DOWN_FRAMES   = 45     # ≈ 3 s at 15 fps
@@ -397,6 +406,28 @@ class AccidentDetector:
         if lost_avg > CRUSHED_CONF_LOST:
             return None
 
+        # Extra sanity check -- bbox area must have shrunk significantly.
+        # A worker walking BEHIND an occluder keeps roughly the same visible
+        # bbox area; a worker who is being CRUSHED / TRAPPED typically has
+        # only a portion of their body visible, so the bbox shrinks.
+        good_areas = [
+            float(max(0.0, (tf.bbox[2] - tf.bbox[0]) * (tf.bbox[3] - tf.bbox[1])))
+            for tf in good_window
+        ]
+        lost_areas = [
+            float(max(0.0, (tf.bbox[2] - tf.bbox[0]) * (tf.bbox[3] - tf.bbox[1])))
+            for tf in lost_window
+        ]
+        good_area = float(np.mean(good_areas)) if good_areas else 0.0
+        lost_area = float(np.mean(lost_areas)) if lost_areas else 0.0
+        if good_area <= 0.0:
+            return None
+        shrink_ratio = lost_area / good_area
+        if shrink_ratio > CRUSHED_BBOX_SHRINK_RATIO:
+            # Bbox didn't shrink enough -- this looks like ordinary occlusion,
+            # not a crush event.
+            return None
+
         confidence = float(np.clip(0.5 + (good_avg - lost_avg), 0.5, 0.99))
         return AccidentEvent(
             frame      = frame_idx,
@@ -407,7 +438,8 @@ class AccidentDetector:
             reason     = (
                 f"Tracked at avg_conf={good_avg:.2f} for {CRUSHED_GOOD_FRAMES} "
                 f"frames, then collapsed to avg_conf={lost_avg:.2f} for "
-                f"{CRUSHED_LOST_FRAMES} frames -- worker likely trapped or covered"
+                f"{CRUSHED_LOST_FRAMES} frames AND bbox shrank to "
+                f"{shrink_ratio*100:.0f}% of baseline -- worker likely trapped or covered"
             ),
         )
 
@@ -733,17 +765,22 @@ class AccidentOverlayRenderer:
         thickness  = max(2, int(round(2 * scale)))
 
         # Use verbose labels for a single event, compact for multi-event so
-        # we can fit several into a narrow portrait-video banner.
+        # we can fit several into a narrow portrait-video banner. Per-track
+        # numbering is intentionally omitted -- the affected workers are
+        # already highlighted by their bbox outline + tag, so the banner
+        # only needs to name what kind of event(s) are happening.
+        seen_types: set = set()
         labels: List[str] = []
         if len(self._active) == 1:
             ev = self._active[0]["event"]
-            label = _EVENT_LABELS.get(ev.type, ev.type)
-            labels.append(f"{label} (Worker #{ev.track_id})")
+            labels.append(_EVENT_LABELS.get(ev.type, ev.type))
         else:
             for entry in self._active:
                 ev = entry["event"]
-                short = _EVENT_LABELS_SHORT.get(ev.type, ev.type)
-                labels.append(f"{short} #{ev.track_id}")
+                if ev.type in seen_types:
+                    continue   # collapse duplicates (same event type, different workers)
+                seen_types.add(ev.type)
+                labels.append(_EVENT_LABELS_SHORT.get(ev.type, ev.type))
         banner_text = "  |  ".join(labels)
 
         # If still too wide, drop trailing events and tag with "+N more".

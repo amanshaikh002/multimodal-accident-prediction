@@ -1,4 +1,4 @@
-import { ShieldAlert, HardHat, PersonStanding, Flame, Activity } from 'lucide-react';
+import { HardHat, PersonStanding, Flame, Activity, AlertOctagon } from 'lucide-react';
 
 /**
  * AllPanel
@@ -7,26 +7,81 @@ import { ShieldAlert, HardHat, PersonStanding, Flame, Activity } from 'lucide-re
  *
  * Expected data shape:
  *   {
- *     mode:         "all",
- *     final_status: "CRITICAL" | "HIGH RISK" | "UNSAFE" | "MODERATE" | "SAFE",
- *     ppe_status:   "SAFE" | "UNSAFE",
- *     pose_status:  "SAFE" | "MODERATE" | "UNSAFE",
- *     fire_status:  "SAFE" | "UNSAFE",
- *     ppe_score:    number,
- *     pose_score:   number,
- *     fire_ratio:   number,
- *     total_frames: number,
- *     fire_frames:  number,
+ *     mode:             "all",
+ *     final_status:     "CRITICAL" | "HIGH RISK" | "UNSAFE" | "MODERATE" | "SAFE",
+ *     ppe_status:       "SAFE" | "UNSAFE",
+ *     pose_status:      "SAFE" | "MODERATE" | "UNSAFE",
+ *     fire_status:      "SAFE" | "UNSAFE",
+ *     accident_status:  "SAFE" | "WARN" | "CRITICAL",
+ *     accident_events:  [{ frame, type, severity, confidence, reason }, ...],
+ *     ppe_score:        number,
+ *     pose_score:       number,
+ *     fire_ratio:       number,
+ *     total_frames:     number,
+ *     fire_frames:      number,
  *   }
  */
 
-const FINAL_META = {
-  CRITICAL:   { color: 'unsafe',  emoji: '🚨', label: 'CRITICAL — FIRE HAZARD',  msg: 'Fire detected on site. Evacuate immediately and activate emergency protocol.' },
-  'HIGH RISK':{ color: 'unsafe',  emoji: '🚨', label: 'HIGH RISK',               msg: 'Both PPE compliance and posture are unsafe. Immediate intervention required.' },
-  UNSAFE:     { color: 'unsafe',  emoji: '⚠️',  label: 'UNSAFE',                 msg: 'A safety violation was detected. Review the annotated video for details.' },
-  MODERATE:   { color: 'warn',    emoji: '⚡',  label: 'MODERATE RISK',           msg: 'Minor compliance issue detected. Please review posture or PPE usage.' },
-  SAFE:       { color: 'safe',    emoji: '✅',  label: 'ALL SAFE',                msg: 'No PPE, posture, or fire violations detected across all modules.' },
+const NON_CRITICAL_META = {
+  'HIGH RISK': { color: 'unsafe', emoji: '🚨', label: 'HIGH RISK',     msg: 'Both PPE compliance and posture are unsafe. Immediate intervention required.' },
+  UNSAFE:      { color: 'unsafe', emoji: '⚠️',  label: 'UNSAFE',        msg: 'A safety violation was detected. Review the annotated video for details.' },
+  MODERATE:    { color: 'warn',   emoji: '⚡',  label: 'MODERATE RISK', msg: 'Minor compliance issue detected. Please review posture or PPE usage.' },
+  SAFE:        { color: 'safe',   emoji: '✅',  label: 'ALL SAFE',      msg: 'No PPE, posture, or fire violations detected across all modules.' },
 };
+
+/** Build the banner meta dynamically so CRITICAL's label reflects what actually triggered it. */
+function buildFinalMeta(data) {
+  const status        = data.final_status    ?? 'UNKNOWN';
+  const fireUnsafe    = data.fire_status     === 'UNSAFE';
+  const accidentCrit  = data.accident_status === 'CRITICAL';
+  const accidentEvts  = Array.isArray(data.accident_events) ? data.accident_events : [];
+
+  if (status === 'CRITICAL') {
+    if (fireUnsafe && accidentCrit) {
+      return {
+        color: 'unsafe', emoji: '🚨',
+        label: 'CRITICAL — FIRE & WORKER ACCIDENT',
+        msg:   'Fire on site AND a worker accident detected. Evacuate, then dispatch first aid.',
+      };
+    }
+    if (fireUnsafe) {
+      return {
+        color: 'unsafe', emoji: '🚨',
+        label: 'CRITICAL — FIRE HAZARD',
+        msg:   'Fire detected on site. Evacuate immediately and activate emergency protocol.',
+      };
+    }
+    if (accidentCrit) {
+      // Pick the most-urgent event type for the message.
+      const priority = ['MOTIONLESS_DOWN', 'CRUSHED', 'FALL', 'STRUCK', 'STUMBLE'];
+      const pretty = {
+        FALL:            'Worker fall',
+        MOTIONLESS_DOWN: 'Worker is down and not moving',
+        CRUSHED:         'Worker may be trapped or covered',
+        STRUCK:          'Possible impact event',
+        STUMBLE:         'Stumble',
+      };
+      const seen = new Set(accidentEvts.map(e => e.type));
+      const top  = priority.find(p => seen.has(p)) ?? null;
+      return {
+        color: 'unsafe', emoji: '🚨',
+        label: 'CRITICAL — WORKER ACCIDENT',
+        msg:   top
+          ? `${pretty[top]} detected. Dispatch first aid immediately and check the worker's condition.`
+          : 'A worker accident was detected. Investigate the scene immediately.',
+      };
+    }
+    // CRITICAL with no clear cause -- shouldn't really happen, but fail safe.
+    return {
+      color: 'unsafe', emoji: '🚨',
+      label: 'CRITICAL',
+      msg:   'A critical safety event was detected. Review the annotated video and act immediately.',
+    };
+  }
+
+  return NON_CRITICAL_META[status]
+    ?? { color: 'neutral', emoji: '❓', label: status, msg: '' };
+}
 
 function ModuleCard({ icon: Icon, title, score, status, color, extra }) {
   const pct = typeof score === 'number' ? Math.min(Math.max(score, 0), 100) : null;
@@ -56,18 +111,22 @@ function ModuleCard({ icon: Icon, title, score, status, color, extra }) {
 export default function AllPanel({ data }) {
   if (!data) return null;
 
-  const finalStatus = data.final_status ?? 'UNKNOWN';
-  const ppeSt       = data.ppe_status   ?? '—';
-  const poseSt      = data.pose_status  ?? '—';
-  const fireSt      = data.fire_status  ?? '—';
-  const ppeScore    = data.ppe_score    ?? 0;
-  const poseScore   = data.pose_score   ?? 0;
-  const fireRatio   = data.fire_ratio   ?? 0;
+  const ppeSt        = data.ppe_status      ?? '—';
+  const poseSt       = data.pose_status     ?? '—';
+  const fireSt       = data.fire_status     ?? '—';
+  const accidentSt   = data.accident_status ?? 'SAFE';
+  const accidentEvts = Array.isArray(data.accident_events) ? data.accident_events : [];
+  const ppeScore     = data.ppe_score       ?? 0;
+  const poseScore    = data.pose_score      ?? 0;
+  const fireRatio    = data.fire_ratio      ?? 0;
 
-  const meta      = FINAL_META[finalStatus] ?? { color: 'neutral', emoji: '❓', label: finalStatus, msg: '' };
-  const ppeColor  = ppeSt  === 'SAFE' ? 'safe'  : 'unsafe';
-  const poseColor = poseSt === 'SAFE' ? 'safe'  : poseSt === 'MODERATE' ? 'warn' : 'unsafe';
-  const fireColor = fireSt === 'SAFE' ? 'safe'  : 'unsafe';
+  const meta         = buildFinalMeta(data);
+  const ppeColor     = ppeSt  === 'SAFE' ? 'safe' : 'unsafe';
+  const poseColor    = poseSt === 'SAFE' ? 'safe' : poseSt === 'MODERATE' ? 'warn' : 'unsafe';
+  const fireColor    = fireSt === 'SAFE' ? 'safe' : 'unsafe';
+  const accidentColor =
+    accidentSt === 'CRITICAL' ? 'unsafe' :
+    accidentSt === 'WARN'     ? 'warn'   : 'safe';
 
   return (
     <div className="analysis-panel">
@@ -99,7 +158,7 @@ export default function AllPanel({ data }) {
         </div>
       </div>
 
-      {/* ── Three module cards ── */}
+      {/* ── Module cards (PPE, Pose, Fire, optional Accident) ── */}
       <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
         <ModuleCard
           icon={HardHat}
@@ -123,6 +182,16 @@ export default function AllPanel({ data }) {
           status={fireSt}
           color={fireColor}
         />
+        {(accidentEvts.length > 0 || accidentSt !== 'SAFE') && (
+          <ModuleCard
+            icon={AlertOctagon}
+            title="Accident Events"
+            score={null}
+            extra={`${accidentEvts.length} event${accidentEvts.length === 1 ? '' : 's'}`}
+            status={accidentSt}
+            color={accidentColor}
+          />
+        )}
       </div>
     </div>
   );

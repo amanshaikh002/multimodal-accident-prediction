@@ -66,6 +66,8 @@ app = FastAPI(
         "Modular AI-powered safety detection backend.\n\n"
         "## Primary Endpoint (recommended)\n"
         "- 🎯 **Unified Detection** — `POST /detect?mode=<ppe|pose|fire|sound|combined|all>`\n"
+        "  - `all` runs **PPE + Pose + Fire** as a single bundle\n"
+        "  - `sound` is its own dedicated mode (not part of `all`)\n"
         "- 📋 **List Modes** — `GET /detect/modes`\n\n"
         "## Legacy Endpoints *(deprecated)*\n"
         "- 🦺 PPE Detection — `POST /detect/ppe`\n"

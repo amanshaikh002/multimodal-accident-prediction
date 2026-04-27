@@ -105,8 +105,8 @@ export default function App() {
       if (mode === 'all' && data.fire_detected) {
         speak('Warning! Fire detected in the workplace. Evacuate immediately.');
       }
-      if (mode === 'all' && data.sound_status === 'UNSAFE') {
-        speak('Warning! Anomalous machine sounds detected.');
+      if (mode === 'all' && data.accident_status === 'CRITICAL') {
+        speak('Warning! A worker accident has been detected. Dispatch first aid immediately.');
       }
 
     } catch (err) {
@@ -198,7 +198,7 @@ export default function App() {
               <option value="fire">🔥 Fire Hazard Detection</option>
               <option value="sound">🔊 Anomaly Sound Detection</option>
               <option value="combined">🔗 PPE + Pose Detection</option>
-              <option value="all">🚀 Full Platform (PPE + Pose + Fire + Sound)</option>
+              <option value="all">🚀 Full Platform (PPE + Pose + Fire)</option>
             </select>
           </div>
 

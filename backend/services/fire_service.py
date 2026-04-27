@@ -436,10 +436,24 @@ def _yolo_detect(model: YOLO, frame: np.ndarray, frame_idx: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def process_fire_video(
-    video_path: str,
+    video_path:        str,
     output_video_path: Optional[str] = None,
+    draw_banner:       bool          = True,
 ) -> Dict[str, Any]:
-    """Analyse a video for fire hazards using YOLO."""
+    """
+    Analyse a video for fire hazards using YOLO.
+
+    Parameters
+    ----------
+    video_path        : path to input video.
+    output_video_path : if given, an annotated video is written here.
+    draw_banner       : when True (default), the FIRE DETECTED / NO FIRE
+                        DETECTED banner is drawn at the top of every frame.
+                        Set to False when chaining fire after another module
+                        that already drew its own top banner -- the fire
+                        bbox+label still gets drawn, but the banner is
+                        suppressed so we don't paint over the upstream UI.
+    """
     model    = _get_model()
     out_path = output_video_path or _OUTPUT_FILE
 
@@ -501,13 +515,15 @@ def process_fire_video(
 
             if confirmed:
                 fire_frames += 1
-                _draw_fire_banner(frame)
+                if draw_banner:
+                    _draw_fire_banner(frame)
                 logger.info(
                     "[FIRE] Frame %d — fire confirmed (streak=%d)",
                     raw_idx, fire_streak,
                 )
             else:
-                _draw_safe_banner(frame)
+                if draw_banner:
+                    _draw_safe_banner(frame)
 
             # Resize for output only — never for inference.
             if (out_w, out_h) != (frame.shape[1], frame.shape[0]):
