@@ -7,14 +7,21 @@ Handles:
   - Label normalisation for your trained model classes
     (helmet, vest, gloves, boots, human)
   - Bounding-box tensor → Python list
-  - Per-frame SAFE/UNSAFE logic
+  - Per-frame SAFE/UNSAFE/UNKNOWN tri-state logic
+  - Motion-based occlusion detection
   - Video-level compliance aggregation
   - Annotated frame drawing with color-coded boxes
 """
 
 import cv2
 import numpy as np
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+# Tri-state safety status. UNKNOWN means "we can't see a person but the scene
+# is not empty" — a person may be occluded behind machinery, debris, etc.
+STATUS_SAFE    = "SAFE"
+STATUS_UNSAFE  = "UNSAFE"
+STATUS_UNKNOWN = "UNKNOWN"
 
 # ---------------------------------------------------------------------------
 # 1.  Label normalisation
@@ -99,38 +106,124 @@ def is_ppe_on_person(person_box: List[float], item_box: List[float]) -> bool:
     return (px1 < cx < px2) and (py1 < cy < py2)
 
 
-def evaluate_frame_safety(
-    detections: List[Dict[str, Any]]
-) -> Tuple[bool, List[str]]:
+# ---------------------------------------------------------------------------
+# 2c.  Motion score — fast frame differencing for occlusion detection
+# ---------------------------------------------------------------------------
+
+# Default motion threshold: fraction of frame pixels that must change
+# (after blur + binary threshold) for the scene to count as "active".
+MOTION_THRESHOLD_DEFAULT: float = 0.015   # 1.5 % of pixels
+
+
+def compute_motion_score(
+    prev_gray: Optional[np.ndarray],
+    curr_gray: Optional[np.ndarray],
+) -> float:
     """
-    Decide per-person PPE compliance using center-point containment.
+    Return the fraction of pixels that changed between two grayscale frames.
 
-    A PPE item is considered "worn" by a person when:
-      1. Its detection confidence >= _MIN_DET_CONF (0.50)
-      2. The CENTER of its bounding box lies INSIDE the person's bounding box
+    Intended for static cameras: high score with no person detected ⇒ likely
+    occlusion or a falling object, not an empty scene.
 
-    If NO person is visible in the frame → safe (nothing to check).
-    If ANY person is missing required PPE  → unsafe.
+    Returns 0.0 if either frame is missing or shapes differ.
+    """
+    if prev_gray is None or curr_gray is None:
+        return 0.0
+    if prev_gray.shape != curr_gray.shape:
+        return 0.0
+
+    diff = cv2.absdiff(prev_gray, curr_gray)
+    diff = cv2.GaussianBlur(diff, (5, 5), 0)
+    _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+    return float(np.count_nonzero(thresh)) / float(thresh.size)
+
+
+def apply_hazard_override(
+    status: str,
+    missing: List[str],
+    reason: Optional[str],
+    hazard_detections: List[Dict[str, Any]],
+) -> Tuple[str, List[str], Optional[str], List[str]]:
+    """
+    Fold open-vocabulary hazard detections (debris, falling rock, fallen
+    person, …) into the tri-state PPE result.
+
+    Hazards are highest-priority — a worker in full PPE next to falling
+    debris is still UNSAFE, and a hazard in an empty / occluded scene
+    flips UNKNOWN to UNSAFE because the danger is real either way.
 
     Returns
     -------
-    (is_safe, missing_items)
+    (status, missing, reason, hazard_labels)
+        hazard_labels — sorted, deduplicated list of hazard classes seen
+                        this frame. Empty when no hazard present.
     """
-    # Detections are already filtered by confidence in ppe_service.py
+    if not hazard_detections:
+        return status, missing, reason, []
+
+    hazard_labels = sorted({d["label"] for d in hazard_detections})
+
+    if status == STATUS_UNSAFE and reason == "missing_ppe":
+        new_reason = "missing_ppe_and_hazard"
+    else:
+        new_reason = "hazard_detected"
+
+    # Status is UNSAFE regardless of prior PPE/occlusion state.
+    return STATUS_UNSAFE, missing, new_reason, hazard_labels
+
+
+def evaluate_frame_safety(
+    detections: List[Dict[str, Any]],
+    motion_score: float = 0.0,
+    person_recently_seen: bool = False,
+    motion_threshold: float = MOTION_THRESHOLD_DEFAULT,
+) -> Tuple[str, List[str], Optional[str]]:
+    """
+    Tri-state PPE compliance decision.
+
+    Status semantics
+    ----------------
+    SAFE     — at least one person visible AND all required PPE present.
+    UNSAFE   — at least one person visible AND some required PPE missing.
+    UNKNOWN  — no person visible BUT either the scene is moving (occlusion or
+               falling object likely) or a person was seen very recently.
+               Refusing to default to SAFE under occlusion is the whole point.
+
+    Only an empty, motionless scene with no recently-seen worker is SAFE
+    without a positive person detection.
+
+    Parameters
+    ----------
+    detections           : filtered detections for this frame
+    motion_score         : fraction of changed pixels vs. previous frame
+                           (0.0 disables the motion check)
+    person_recently_seen : True if a person was detected in the last few frames
+    motion_threshold     : motion score above which the scene counts as active
+
+    Returns
+    -------
+    (status, missing_items, reason)
+        status        ∈ {SAFE, UNSAFE, UNKNOWN}
+        missing_items list of missing required PPE labels (empty unless UNSAFE)
+        reason        short tag describing why (None for SAFE)
+    """
     dets = detections
 
     has_human = any(d["label"] == "human" for d in dets)
+
+    # ── No person detected → tri-state branch, never blindly SAFE ────────────
     if not has_human:
-        # No person visible → treat as safe (no one to check)
-        return True, []
+        if motion_score >= motion_threshold:
+            return STATUS_UNKNOWN, [], "no_person_but_motion"
+        if person_recently_seen:
+            return STATUS_UNKNOWN, [], "person_recently_seen"
+        return STATUS_SAFE, [], None
 
-    # ── 2. Separate person boxes and PPE boxes ────────────────────────────────
+    # ── Person(s) detected → per-person PPE check ────────────────────────────
     person_boxes = [d["bbox"] for d in dets if d["label"] == "human"]
-
     helmet_boxes = [d["bbox"] for d in dets if d["label"] == "helmet"]
     vest_boxes   = [d["bbox"] for d in dets if d["label"] == "vest"]
 
-    # Debug info
     import logging as _log
     _logger = _log.getLogger(__name__)
     _logger.debug(
@@ -138,9 +231,7 @@ def evaluate_frame_safety(
         len(person_boxes), len(helmet_boxes), len(vest_boxes),
     )
 
-    # ── 3. Per-person assignment via center-point containment ─────────────────
     missing_set: set = set()
-
     for person_box in person_boxes:
         helmet_on = any(is_ppe_on_person(person_box, hb) for hb in helmet_boxes)
         vest_on   = any(is_ppe_on_person(person_box, vb) for vb in vest_boxes)
@@ -155,9 +246,10 @@ def evaluate_frame_safety(
         if not vest_on:
             missing_set.add("vest")
 
-    missing  = sorted(missing_set)
-    is_safe  = len(missing) == 0
-    return is_safe, missing
+    missing = sorted(missing_set)
+    if missing:
+        return STATUS_UNSAFE, missing, "missing_ppe"
+    return STATUS_SAFE, [], None
 
 
 # ---------------------------------------------------------------------------
@@ -173,36 +265,71 @@ def compute_summary(
     Parameters
     ----------
     frame_results : list of dict
-        Each dict: {frame_id, safe, missing, detections}
+        Each dict: {frame_id, status, safe, missing, reason, detections}
+        ``safe`` is kept for backward compatibility with downstream services
+        but ``status`` is the authoritative tri-state value.
 
     Returns
     -------
-    dict with keys matching the required output JSON schema.
+    dict with the per-frame counts (including UNKNOWN) and a flat violations
+    list. UNKNOWN frames appear in violations with type ``occlusion`` so the
+    frontend / combined pipeline can surface them instead of silently
+    dropping into SAFE.
     """
-    total   = len(frame_results)
+    total = len(frame_results)
     if total == 0:
         return {
             "total_frames":     0,
             "safe_frames":      0,
             "unsafe_frames":    0,
+            "unknown_frames":   0,
+            "hazard_frames":    0,
             "compliance_score": 0.0,
             "violations":       [],
         }
 
-    safe_frames   = sum(1 for f in frame_results if f["safe"])
-    unsafe_frames = total - safe_frames
-    compliance    = round((safe_frames / total) * 100, 2)
+    safe_frames    = sum(1 for f in frame_results if f.get("status") == STATUS_SAFE)
+    unsafe_frames  = sum(1 for f in frame_results if f.get("status") == STATUS_UNSAFE)
+    unknown_frames = sum(1 for f in frame_results if f.get("status") == STATUS_UNKNOWN)
+    hazard_frames  = sum(1 for f in frame_results if f.get("hazards"))
 
-    violations = [
-        {"frame": f["frame_id"], "missing": f["missing"]}
-        for f in frame_results
-        if not f["safe"]
-    ]
+    compliance = round((safe_frames / total) * 100, 2)
+
+    violations: List[Dict[str, Any]] = []
+    for f in frame_results:
+        st       = f.get("status")
+        hazards  = f.get("hazards") or []
+        reason   = f.get("reason")
+
+        if hazards:
+            violations.append({
+                "frame":   f["frame_id"],
+                "type":    "hazard",
+                "missing": f.get("missing", []),
+                "hazards": hazards,
+                "reason":  reason or "hazard_detected",
+            })
+        elif st == STATUS_UNSAFE:
+            violations.append({
+                "frame":   f["frame_id"],
+                "type":    "missing_ppe",
+                "missing": f.get("missing", []),
+                "reason":  reason or "missing_ppe",
+            })
+        elif st == STATUS_UNKNOWN:
+            violations.append({
+                "frame":   f["frame_id"],
+                "type":    "occlusion",
+                "missing": [],
+                "reason":  reason or "no_person_visible",
+            })
 
     return {
         "total_frames":     total,
         "safe_frames":      safe_frames,
         "unsafe_frames":    unsafe_frames,
+        "unknown_frames":   unknown_frames,
+        "hazard_frames":    hazard_frames,
         "compliance_score": compliance,
         "violations":       violations,
     }
@@ -223,18 +350,33 @@ _COLOURS: Dict[str, Tuple[int, int, int]] = {
 _MISSING_COLOUR: Tuple[int, int, int] = (0, 0, 255)   # red for unknown/alerts
 
 
+_UNKNOWN_REASONS: Dict[str, str] = {
+    "no_person_but_motion":  "OCCLUDED – motion without visible worker",
+    "person_recently_seen":  "OCCLUDED – worker hidden",
+    "no_person_visible":     "UNKNOWN – no worker visible",
+}
+
+# Bright red for hazard boxes — distinct from PPE missing-item red.
+_HAZARD_COLOUR: Tuple[int, int, int] = (40, 40, 240)
+
+
 def draw_detections(
     frame: np.ndarray,
     detections: List[Dict[str, Any]],
-    is_safe: bool,
+    status: str,
     missing: List[str],
+    reason: Optional[str] = None,
+    hazard_detections: Optional[List[Dict[str, Any]]] = None,
 ) -> np.ndarray:
     """
-    Draw colour-coded bounding boxes and a safety status banner on *frame*.
+    Draw colour-coded bounding boxes and a tri-state status banner on *frame*.
 
-    Returns a new annotated copy (does not modify original).
+    Returns a new annotated copy (does not modify original). When
+    ``hazard_detections`` is non-empty, hazard boxes are drawn in bright red
+    and the banner names the worst hazard label.
     """
     out = frame.copy()
+    hazards = hazard_detections or []
 
     for det in detections:
         label = det["label"]
@@ -252,9 +394,38 @@ def draw_detections(
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
         )
 
-    # Top-left safety banner
-    banner_colour = (0, 200, 0) if is_safe else (0, 0, 230)
-    banner_text   = "SAFE" if is_safe else f"UNSAFE – missing: {', '.join(missing)}"
+    # Hazard boxes drawn last so they overlay everything except the banner.
+    for hz in hazards:
+        x1, y1, x2, y2 = [int(v) for v in hz["bbox"]]
+        cv2.rectangle(out, (x1, y1), (x2, y2), _HAZARD_COLOUR, 3)
+
+        text = f"HAZARD: {hz['label']} {hz['confidence']:.2f}"
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.rectangle(out, (x1, y1 - th - 6), (x1 + tw + 4, y1), _HAZARD_COLOUR, -1)
+        cv2.putText(
+            out, text, (x1 + 2, y1 - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+    # Top-left safety banner — green/red/yellow for SAFE/UNSAFE/UNKNOWN.
+    # Hazards always force a red banner with the hazard label called out.
+    if hazards:
+        banner_colour = _HAZARD_COLOUR
+        hz_labels     = sorted({h["label"] for h in hazards})
+        if missing:
+            banner_text = f"UNSAFE – HAZARD ({', '.join(hz_labels)}) + missing: {', '.join(missing)}"
+        else:
+            banner_text = f"UNSAFE – HAZARD: {', '.join(hz_labels)}"
+    elif status == STATUS_SAFE:
+        banner_colour = (0, 200, 0)
+        banner_text   = "SAFE"
+    elif status == STATUS_UNSAFE:
+        banner_colour = (0, 0, 230)
+        banner_text   = f"UNSAFE – missing: {', '.join(missing)}" if missing else "UNSAFE"
+    else:  # STATUS_UNKNOWN
+        banner_colour = (0, 200, 230)   # amber/yellow in BGR
+        banner_text   = _UNKNOWN_REASONS.get(reason or "", "UNKNOWN – worker not visible")
+
     cv2.rectangle(out, (0, 0), (out.shape[1], 34), banner_colour, -1)
     cv2.putText(
         out, banner_text, (8, 24),

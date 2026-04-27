@@ -457,10 +457,15 @@ def _render_combined_video(
                     )
 
             elif not have_pose:
-                # No person detected — just evaluate PPE globally
-                _, global_missing = evaluate_frame_safety(ppe_dets)
+                # No person detected — just evaluate PPE globally.
+                # Combined pipeline doesn't track motion/recency state, so we
+                # call the tri-state evaluator without context; it will
+                # collapse to SAFE for an empty scene or UNSAFE for visible
+                # PPE-on-no-person edge cases. UNKNOWN is surfaced by the
+                # standalone PPE service which does maintain that state.
+                ppe_status, global_missing, _reason = evaluate_frame_safety(ppe_dets)
                 all_missing = global_missing
-                worst_status = "UNSAFE" if global_missing else "SAFE"
+                worst_status = "UNSAFE" if ppe_status == "UNSAFE" else "SAFE"
                 n_persons    = 0
 
             # ── STEP 4: Global banner (drawn last so it's always on top) ─────
