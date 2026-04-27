@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile, sys; [py_compile.compile\\(f, doraise=True\\) for f in ['backend/utils/ppe_utils.py','backend/services/ppe_service.py','backend/services/combined_service.py']]; print\\('OK'\\)\")",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue)",
+      "PowerShell($paths = @\\(\"$env:ProgramFiles\\\\GitHub CLI\\\\gh.exe\",\"$env:LOCALAPPDATA\\\\GitHubCLI\\\\gh.exe\",\"$env:ProgramFiles\\\\Git\\\\mingw64\\\\bin\\\\gh.exe\"\\); $paths | Where-Object { Test-Path $_ })",
+      "Bash(python -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['backend/utils/ppe_utils.py','backend/services/ppe_service.py','backend/services/combined_service.py']]; print\\('OK'\\)\")",
+      "Bash(gh --version)"
+    ]
+  }
+}
