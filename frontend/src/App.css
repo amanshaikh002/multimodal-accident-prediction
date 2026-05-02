@@ -65,7 +65,7 @@
 
 .brand-sub {
   font-size: clamp(0.72rem, 1.1vw, 0.875rem); /* 14px max */
-  color: #94a3b8;
+  color: var(--text-secondary);
   font-weight: 400;
   margin-top: 0.2rem;
   white-space: nowrap;

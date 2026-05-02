@@ -1,0 +1,74 @@
+/*
+ * landing.css — minimal theme for the landing page.
+ * Inspired by Stripe / Linear / Vercel: heavy reliance on Tailwind
+ * utilities, very few custom classes. Everything is scoped under
+ * `.landing-root` to stay isolated from the dashboard styles.
+ */
+
+@import "tailwindcss";
+
+/* ── Brand theme tokens ───────────────────────────────────────────────── */
+@theme {
+  --color-brand-bg:        #F7F5F2;
+  --color-brand-card:      #FFFFFF;
+  --color-brand-primary:   #3B82F6;
+  --color-brand-secondary: #10B981;
+  --color-brand-dark:      #1F2937;
+  --color-brand-text:      #111827;
+  --color-brand-muted:     #6B7280;
+  --color-brand-border:    #E5E7EB;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* ── Landing root ─────────────────────────────────────────────────────── */
+.landing-root {
+  background: var(--color-brand-bg);
+  color: var(--color-brand-text);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.005em;
+}
+
+html { scroll-behavior: smooth; }
+
+/* ── Gradient text helper (used sparingly) ────────────────────────────── */
+.landing-root .gradient-text {
+  background: linear-gradient(90deg, #3B82F6 0%, #10B981 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  -webkit-text-fill-color: transparent;
+          color: transparent;
+}
+
+/* ── Subtle pulsing dot for "live" indicators ─────────────────────────── */
+@keyframes pulseDot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+.landing-root .live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--color-brand-secondary);
+  animation: pulseDot 1.8s ease-out infinite;
+}
+
+/* ── Fade-up entrance ─────────────────────────────────────────────────── */
+@keyframes fadeUp {
+  0%   { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.landing-root .animate-fade-up {
+  animation: fadeUp 600ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-root .animate-fade-up,
+  .landing-root .live-dot {
+    animation: none !important;
+  }
+}

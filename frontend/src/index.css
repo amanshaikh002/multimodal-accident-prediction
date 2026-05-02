@@ -1,54 +1,62 @@
 /* ============================================================
    index.css — Global Design Tokens
    Multimodal Vision Audio Framework Dashboard
+   ------------------------------------------------------------
+   Now uses the LANDING palette (light) so the whole product —
+   landing page AND dashboard — feels like one cohesive site.
    ============================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* ── Reset & Base ─────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* ── Reset & Base ─────────────────────────────────────────────
+   Scoped to .app (dashboard) so the dashboard's aggressive
+   margin/padding zero-out does NOT leak into the landing page,
+   which uses Tailwind's spacing utilities and would otherwise
+   have its mt-*, mx-auto, and pt-* overridden. */
+*, *::before, *::after { box-sizing: border-box; }
+.app, .app *, .app *::before, .app *::after { margin: 0; padding: 0; }
 
 :root {
-  /* ── Background ──────────────────────────────────────────── */
-  --bg-base:        #0f172a;
-  --bg-surface:     #141e33;
-  --bg-card:        #1a2540;
-  --bg-card-hover:  #1e2d4a;
+  /* ── Background (light) ──────────────────────────────────── */
+  --bg-base:        #F7F5F2;   /* page background — same as landing */
+  --bg-surface:     #FFFFFF;   /* header, control bar, top-level surfaces */
+  --bg-card:        #FFFFFF;   /* card background */
+  --bg-card-hover:  #F9FAFB;   /* subtle hover tint */
 
   /* ── Borders ─────────────────────────────────────────────── */
-  --border:         #243048;
-  --border-strong:  #2d3f5e;
+  --border:         #E5E7EB;
+  --border-strong:  #D1D5DB;
 
-  /* ── Typography ──────────────────────────────────────────── */
-  --text-primary:   #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted:     #4d6080;
+  /* ── Typography (dark on light) ──────────────────────────── */
+  --text-primary:   #111827;
+  --text-secondary: #6B7280;
+  --text-muted:     #9CA3AF;
 
-  /* ── Semantic colours ────────────────────────────────────── */
+  /* ── Semantic colours (palette unchanged — they read on both themes) ── */
   --safe:           #10b981;
   --safe-bg:        rgba(16,185,129,.10);
-  --safe-border:    rgba(16,185,129,.25);
+  --safe-border:    rgba(16,185,129,.30);
 
   --unsafe:         #ef4444;
   --unsafe-bg:      rgba(239,68,68,.10);
-  --unsafe-border:  rgba(239,68,68,.25);
+  --unsafe-border:  rgba(239,68,68,.30);
 
   --warn:           #f59e0b;
   --warn-bg:        rgba(245,158,11,.10);
-  --warn-border:    rgba(245,158,11,.25);
+  --warn-border:    rgba(245,158,11,.30);
 
   --accent:         #3b82f6;
   --accent-bg:      rgba(59,130,246,.10);
-  --accent-border:  rgba(59,130,246,.25);
+  --accent-border:  rgba(59,130,246,.30);
 
   /* ── Radius ──────────────────────────────────────────────── */
   --r-sm:  6px;
   --r-md:  10px;
   --r-lg:  14px;
 
-  /* ── Shadows ─────────────────────────────────────────────── */
-  --shadow-sm:   0 1px 4px rgba(0,0,0,.35);
-  --shadow-card: 0 2px 12px rgba(0,0,0,.40);
+  /* ── Shadows (lightened for light theme) ─────────────────── */
+  --shadow-sm:   0 1px 2px rgba(17, 24, 39, 0.05);
+  --shadow-card: 0 4px 14px -4px rgba(17, 24, 39, 0.10);
 }
 
 html { font-size: 16px; scroll-behavior: smooth; }
@@ -74,11 +82,11 @@ body {
   white-space: nowrap;
 }
 
-/* ── Scrollbar ────────────────────────────────────────────── */
-::-webkit-scrollbar        { width: 5px; height: 5px; }
-::-webkit-scrollbar-track  { background: var(--bg-base); }
-::-webkit-scrollbar-thumb  { background: var(--border-strong); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+/* ── Scrollbar (light theme) ──────────────────────────────── */
+::-webkit-scrollbar        { width: 8px; height: 8px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: rgba(17, 24, 39, 0.18); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(17, 24, 39, 0.32); }
 
 /* ── Animations ───────────────────────────────────────────── */
 @keyframes spin         { to { transform: rotate(360deg); } }
